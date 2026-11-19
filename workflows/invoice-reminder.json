@@ -1,0 +1,489 @@
+{
+  "id": "219744a4d89f5e02",
+  "name": "Send overdue invoice reminders from Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 8,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "5130e120-f6e9-5afe-83b0-1e8e355d9596",
+      "name": "Daily Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        40,
+        430
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"sheet_id\": \"{{SHEET_ID}}\",\n  \"sheet_name\": \"{{SHEET_NAME}}\",\n  \"sender_email\": \"{{SENDER_EMAIL}}\",\n  \"due_days\": 3,\n  \"message_template\": \"Hi {{name}}, a friendly reminder that {{item}} is now {{days}} days past its due date. Let me know if you need a copy of the invoice or a revised payment date.\",\n  \"subject_template\": \"Reminder: {{item}} is past due\"\n}",
+        "options": {}
+      },
+      "id": "e27b89e8-7083-534f-9be3-6adb678ed34f",
+      "name": "CONFIG",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        260,
+        430
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $json.sheet_id }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $json.sheet_name }}",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "abb5527f-16d6-5461-bceb-5d450a619e62",
+      "name": "Read Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        520,
+        430
+      ],
+      "disabled": true,
+      "notes": "DISABLED until you attach your own credential in n8n. Select the credential, then enable this node. See README > Nodes disabled until you attach credentials.",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Domain-neutral. MISI N fixes three defects found by clean-room testing:\n//  (1) The old version DROPPED every non-due row, so the If node's FALSE\n//      output could never fire. Every row now leaves this node with an\n//      explicit needs_action boolean, and both If outputs are reachable.\n//  (2) Duplicate record_id values produced duplicate outbound messages.\n//      A stable row key now de-duplicates the input before any send.\n//  (3) A retry after a successful write-back re-sent the same message.\n//      Terminal statuses are skipped, and Mark Contacted writes a terminal\n//      status so the second run is a no-op.\nconst cfg = $('CONFIG').first().json;\nconst batas = Number(cfg.due_days || 3);\nconst terminal = new Set(['done', 'contacted', 'sent', 'complete', 'completed', 'paid']);\nconst seen = new Set();\nconst keluar = [];\nfor (const item of $input.all()) {\n  const p = item.json;\n  const key = String(p.record_id !== undefined && p.record_id !== null\n    ? p.record_id : (String(p.email) + '|' + String(p.item_ref)));\n  if (seen.has(key)) continue;\n  seen.add(key);\n  const status = String(p.status || '').toLowerCase();\n  const t = new Date(String(p.last_activity) + 'T00:00:00Z').getTime();\n  const days = Number.isFinite(t) ? Math.max(0, Math.floor((Date.now() - t) / 86400000)) : 0;\n  const needs = !terminal.has(status) && days >= batas;\n  keluar.push({ json: Object.assign({}, p, { days_since: days, needs_action: needs }) });\n}\nreturn keluar;"
+      },
+      "id": "199a2908-c194-50c2-864c-ad4e6fbbb1e2",
+      "name": "Compute Due Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        430
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Reshapes data only (it does not call an external service). Kept separate from the HTTP and Sheets nodes so a failure here is easy to trace."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "syarat-1",
+              "leftValue": "={{ $json.needs_action }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "fad4cb64-992c-5753-bf7d-c8319c793969",
+      "name": "Any Due?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1000,
+        430
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generic token merge: the node does not know which domain it is serving.\nconst cfg = $('CONFIG').first().json;\nconst tpl = String(cfg.message_template || '');\nconst subjTpl = String(cfg.subject_template || '');\nconst peta = { name: 'contact_name', item: 'item_ref', days: 'days_since' };\nconst isi = function (s, p) {\n  return String(s).replace(/\\{\\{([a-z_]+)\\}\\}/g, function (m, k) {\n    const f = peta[k];\n    return (f && p[f] !== undefined && p[f] !== null) ? String(p[f]) : m;\n  });\n};\nreturn $input.all().map(function (item) {\n  const p = item.json;\n  return { json: Object.assign({}, p, {\n    recipient: p.email,\n    subject: isi(subjTpl, p),\n    message: isi(tpl, p)\n  }) };\n});"
+      },
+      "id": "67fece82-aaee-5039-ba33-993caee2c26a",
+      "name": "Build Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1240,
+        430
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Reshapes data only (it does not call an external service). Kept separate from the HTTP and Sheets nodes so a failure here is easy to trace."
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.recipient }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.message }}",
+        "options": {}
+      },
+      "id": "2ff8e919-5f86-57da-8426-e1b4e0689be6",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1460,
+        430
+      ],
+      "disabled": true,
+      "notes": "DISABLED until you attach your own credential in n8n. Select the credential, then enable this node. See README > Nodes disabled until you attach credentials.",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "PLACEHOLDER",
+          "name": "Gmail account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $('CONFIG').first().json.sheet_id }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('CONFIG').first().json.sheet_name }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "done",
+            "last_activity": "={{ $now.toISODate() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "5bef830d-1b04-523b-b682-33578b390919",
+      "name": "Mark Contacted",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1680,
+        430
+      ],
+      "disabled": true,
+      "notes": "DISABLED until you attach your own credential in n8n. Select the credential, then enable this node. See README > Nodes disabled until you attach credentials.",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "PLACEHOLDER",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {},
+      "id": "9d98d1f2-b5a5-5ae8-93a7-daaefcc264fc",
+      "name": "No Action",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        690
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5e752c1d-97ad-5d1e-ba09-09140c9d9598",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1900,
+        430
+      ]
+    },
+    {
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "Provider or branch failure - inspect the execution log"
+      },
+      "id": "nfgalat01",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        760,
+        810
+      ],
+      "notes": "Every error branch ends here. Any node that can fail is routed to this one, so a single failure stops the run with a visible message instead of a silent success."
+    },
+    {
+      "parameters": {
+        "content": "### How it works\n**Job:** Send the polite reminder that freelancers keep postponing.\n\n1. **Daily Schedule** fires once a day at 08:00.\n2. **CONFIG** holds the sheet id, the sheet name, the sender address, `due_days` and both message templates. It is the only node you edit.\n3. **Read Rows** reads every row of the invoice sheet.\n4. **Compute Due Rows** keeps every row but adds `days_since` and a `needs_action` flag: a row is due when it is an invoice whose `last_activity` is older than `due_days` days and is still unpaid. Duplicate `record_id` values are dropped and rows already marked done are skipped.\n5. **Any Due?** routes rows with `needs_action = true` to the email branch; every other row ends at **No Action**.\n6. **Build Message** fills `{{name}}`, `{{item}}` and `{{days}}` from the row and sets the recipient from the `email` column.\n7. **Send Email** sends one Gmail per row, then **Mark Contacted** writes `status = done` and today's date back to the sheet.\n\n### Setup\n1. Attach a Google Sheets credential to **Read Rows** and **Mark Contacted**, and a Gmail credential to **Send Email**.\n2. Enable those three nodes. They ship deactivated so nothing is sent before you are ready.\n3. In **CONFIG** replace `{{SHEET_ID}}`, `{{SHEET_NAME}}` and `{{SENDER_EMAIL}}`.\n4. The sheet needs the columns `record_id`, `contact_name`, `email`, `item_ref`, `last_activity` and `status`.\n5. Run once by hand, check the sheet, then activate.\n\n### Customization\n`due_days` doubles as your grace period after the invoice date: 3 is friendly, 7 is lenient. `paid` is already a terminal status, so a paid invoice is never chased.",
+        "height": 700,
+        "width": 940,
+        "color": 1
+      },
+      "id": "nfvis-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        -440
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 1 - Trigger and configuration\n**Daily Schedule** fires at 08:00. **CONFIG** is the only node you edit: sheet id, sheet name, sender address, `due_days` and the two templates.",
+        "height": 130,
+        "width": 440,
+        "color": 7
+      },
+      "id": "nfvis-1-trigger-and-configuration",
+      "name": "1 - Trigger and configuration",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        20,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 2 - Read and decide\n**Read Rows** pulls the sheet, **Compute Due Rows** adds `days_since` and `needs_action`, and **Any Due?** splits the batch. Nothing leaves n8n before this point.",
+        "height": 130,
+        "width": 700,
+        "color": 7
+      },
+      "id": "nfvis-2-read-and-decide",
+      "name": "2 - Read and decide",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        500,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 3 - Compose, send, record\nOne Gmail per due row, then the row is stamped `status = done` with today's date. **Done** marks the end of the happy path.",
+        "height": 130,
+        "width": 900,
+        "color": 7
+      },
+      "id": "nfvis-3-compose-send-record",
+      "name": "3 - Compose, send, record",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1220,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 4 - Idle and error exits\n**No Action** is the quiet exit when nothing is due. **Log Error** stops the run with a visible message instead of a silent success.",
+        "height": 400,
+        "width": 700,
+        "color": 7
+      },
+      "id": "nfvis-4-idle-and-error-exits",
+      "name": "4 - Idle and error exits",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        720,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Read this before the first run\nThree nodes ship deactivated and both credentials are empty. Attach Google Sheets and Gmail, then enable **Read Rows**, **Send Email** and **Mark Contacted**, or the flow finishes without sending anything.",
+        "height": 240,
+        "width": 560,
+        "color": 3
+      },
+      "id": "nfvis-read-this-first",
+      "name": "Read this first",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1520,
+        -320
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Schedule": {
+      "main": [
+        [
+          {
+            "node": "CONFIG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONFIG": {
+      "main": [
+        [
+          {
+            "node": "Read Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Rows": {
+      "main": [
+        [
+          {
+            "node": "Compute Due Rows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Due Rows": {
+      "main": [
+        [
+          {
+            "node": "Any Due?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Due?": {
+      "main": [
+        [
+          {
+            "node": "Build Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Message": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [
+          {
+            "node": "Mark Contacted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Contacted": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "invoice"
+    },
+    {
+      "name": "reminder"
+    },
+    {
+      "name": "google-sheets"
+    },
+    {
+      "name": "gmail"
+    }
+  ],
+  "description": "Checks an invoice sheet every morning and emails a polite reminder for each invoice that is past its due date, then marks the row as contacted. Built for freelancers for whom a missed invoice costs more than one reminder email."
+}

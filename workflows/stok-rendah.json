@@ -1,0 +1,281 @@
+{
+ "name": "Daily low-stock digest from Google Sheets",
+ "nodes": [
+  {
+   "parameters": {
+    "content": "## How it works\n\n**Job:** the 07:00 message that tells you what to reorder, before a customer finds it out of stock.\n\n1. **Daily Schedule** fires at 07:00.\n2. **CONFIG** holds the sheet id, sheet name and the Telegram chat id. It is the only node you edit.\n3. **Read Rows** reads the inventory sheet.\n4. **Compute Shortfall** keeps only rows where `stock` is at or below `reorder_point`, and adds `days_left` and `shortfall`.\n5. **Build Digest** merges those rows into ONE message, sorted by fewest days of stock left.\n6. **Needs Alert?** sends it when there is at least one item; otherwise the run ends at **Nothing to Report**.",
+    "height": 400,
+    "width": 620
+   },
+   "id": "A9RqEwMUOUi4O46U",
+   "name": "How it works",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    -20,
+    -380
+   ]
+  },
+  {
+   "parameters": {
+    "content": "## Sheet columns\n\nPut these in row 1, with these exact names:\n\n`sku` `item` `supplier` `stock` `reorder_point` `daily_usage`\n\n`daily_usage` is how many units you sell on a normal day. If it is 0 or missing, `days_left` becomes empty and the item sorts last instead of breaking the digest.",
+    "height": 300,
+    "width": 520
+   },
+   "id": "IjJYxB6W5vvHxbAw",
+   "name": "Sheet columns",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    620,
+    -380
+   ]
+  },
+  {
+   "parameters": {
+    "content": "## Why one message\n\nTelegram rate-limits bursts. Sending one message per item fails quietly once a supplier list grows past a few dozen rows.\n\nThis template aggregates first and sends once, so the run stays a single API call no matter how many items are low.",
+    "height": 300,
+    "width": 520
+   },
+   "id": "u3xpJ37sabEQpIn1",
+   "name": "Why one message",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    1160,
+    -380
+   ]
+  },
+  {
+   "parameters": {
+    "rule": {
+     "interval": [
+      {
+       "field": "days",
+       "daysInterval": 1,
+       "triggerAtHour": 7,
+       "triggerAtMinute": 0
+      }
+     ]
+    }
+   },
+   "id": "wwIe2aYtD20jOqkx",
+   "name": "Daily Schedule",
+   "type": "n8n-nodes-base.scheduleTrigger",
+   "typeVersion": 1.2,
+   "position": [
+    0,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "mode": "raw",
+    "jsonOutput": "{\n  \"sheet_id\": \"{{SHEET_ID}}\",\n  \"sheet_name\": \"Inventory\",\n  \"chat_id\": \"{{CHAT_ID}}\"\n}",
+    "options": {}
+   },
+   "id": "8JgeJ8RsbK6qcfUZ",
+   "name": "CONFIG",
+   "type": "n8n-nodes-base.set",
+   "typeVersion": 3.4,
+   "position": [
+    240,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "operation": "read",
+    "documentId": {
+     "__rl": true,
+     "value": "={{ $json.sheet_id }}",
+     "mode": "id"
+    },
+    "sheetName": {
+     "__rl": true,
+     "value": "={{ $json.sheet_name }}",
+     "mode": "name"
+    },
+    "options": {}
+   },
+   "id": "AoDm3AoRyIU4q14M",
+   "name": "Read Rows",
+   "type": "n8n-nodes-base.googleSheets",
+   "typeVersion": 4.5,
+   "position": [
+    480,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "// Keeps only items at or below their reorder point. Everything else is dropped\n// here, so the digest never lists an item that does not need ordering.\nconst out = [];\nfor (const item of $input.all()) {\n  const p = item.json;\n  const stock = Number(p.stock);\n  const point = Number(p.reorder_point);\n  if (!Number.isFinite(stock) || !Number.isFinite(point)) continue;\n  if (stock > point) continue;\n  const use = Number(p.daily_usage);\n  const days = Number.isFinite(use) && use > 0 ? Math.floor(stock / use) : null;\n  out.push({ json: {\n    sku: String(p.sku || '').trim(),\n    item: String(p.item || '').trim(),\n    supplier: String(p.supplier || '').trim() || 'Unassigned',\n    stock: stock,\n    reorder_point: point,\n    days_left: days,\n    shortfall: point - stock\n  }});\n}\n// Fewest days of stock first: that is the order you actually order in.\nout.sort(function (a, b) {\n  const da = a.json.days_left === null ? 9999 : a.json.days_left;\n  const db = b.json.days_left === null ? 9999 : b.json.days_left;\n  return da - db;\n});\nreturn out;\n"
+   },
+   "id": "02bPwQrtRVWZD46L",
+   "name": "Compute Shortfall",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    720,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "// One message, not one per item. A burst of Telegram sends gets rate-limited,\n// and a single digest is what a person can actually act on at 07:00.\nconst cfg = $('CONFIG').first().json;\nconst rows = $input.all().map(function (i) { return i.json; });\nif (rows.length === 0) {\n  return [{ json: { needs_alert: false, chat_id: cfg.chat_id, text: '' } }];\n}\nconst baris = rows.map(function (r) {\n  const hari = r.days_left === null ? 'no usage data' : r.days_left + 'd left';\n  return '- ' + r.item + ' (' + r.sku + ') ' + r.stock + '/' + r.reorder_point + ', ' + hari;\n});\nconst teks = 'Low stock: ' + rows.length + ' item' + (rows.length === 1 ? '' : 's') + '\\n' + baris.join('\\n');\nreturn [{ json: { needs_alert: true, chat_id: cfg.chat_id, text: teks } }];\n"
+   },
+   "id": "Cn2AUZCFowxQ0y2r",
+   "name": "Build Digest",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    960,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "conditions": {
+     "options": {
+      "caseSensitive": true,
+      "leftValue": "",
+      "typeValidation": "strict",
+      "version": 2
+     },
+     "conditions": [
+      {
+       "id": "ada-item",
+       "leftValue": "={{ $json.needs_alert }}",
+       "rightValue": "",
+       "operator": {
+        "type": "boolean",
+        "operation": "true",
+        "singleValue": true
+       }
+      }
+     ],
+     "combinator": "and"
+    },
+    "options": {}
+   },
+   "id": "GtOwIN9GUPvY3Oav",
+   "name": "Needs Alert?",
+   "type": "n8n-nodes-base.if",
+   "typeVersion": 2.2,
+   "position": [
+    1200,
+    0
+   ]
+  },
+  {
+   "parameters": {
+    "chatId": "={{ $json.chat_id }}",
+    "text": "={{ $json.text }}",
+    "additionalFields": {}
+   },
+   "id": "MRlmho1ruOvQgFsi",
+   "name": "Send Digest",
+   "type": "n8n-nodes-base.telegram",
+   "typeVersion": 1.2,
+   "position": [
+    1440,
+    -100
+   ]
+  },
+  {
+   "parameters": {},
+   "id": "vExMA3grrPYJyGzY",
+   "name": "Nothing to Report",
+   "type": "n8n-nodes-base.noOp",
+   "typeVersion": 1,
+   "position": [
+    1440,
+    100
+   ]
+  }
+ ],
+ "connections": {
+  "Daily Schedule": {
+   "main": [
+    [
+     {
+      "node": "CONFIG",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "CONFIG": {
+   "main": [
+    [
+     {
+      "node": "Read Rows",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Read Rows": {
+   "main": [
+    [
+     {
+      "node": "Compute Shortfall",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Compute Shortfall": {
+   "main": [
+    [
+     {
+      "node": "Build Digest",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Build Digest": {
+   "main": [
+    [
+     {
+      "node": "Needs Alert?",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Needs Alert?": {
+   "main": [
+    [
+     {
+      "node": "Send Digest",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Nothing to Report",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "active": false,
+ "settings": {
+  "executionOrder": "v1"
+ },
+ "pinData": {},
+ "meta": {
+  "templateCredsSetupCompleted": false
+ },
+ "tags": []
+}

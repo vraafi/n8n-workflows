@@ -1,0 +1,305 @@
+{
+  "name": "Record Gumroad sales in Airtable without duplicates",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Gumroad sale -> Airtable, without duplicates\n\nGumroad sends a **Ping** (webhook) on every sale. This workflow turns that ping into one Airtable row and writes a run log entry either way.\n\n**Why a webhook instead of polling:** nothing is missed between runs, and the row lands in seconds.\n\n**Why it never duplicates:** the write uses `performUpsert` on `sale_id`, so a retried delivery updates the same row instead of adding a second one.\n\nSet up: 1) open *Settings* and fill in your base and table names, 2) connect the Airtable header credential, 3) point Gumroad's Ping URL at this workflow's production URL.",
+        "height": 300,
+        "width": 420
+      },
+      "id": "overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gumroad-sale",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "gumroad-sale-ping",
+      "name": "Gumroad sale ping",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"base_id\": \"{{AIRTABLE_BASE_ID}}\",\n  \"sales_table\": \"Sales\",\n  \"log_table\": \"Run Log\"\n}",
+        "options": {}
+      },
+      "id": "settings",
+      "name": "Settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -40,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn a Gumroad sale ping into one Airtable row, or reject it with a reason.\n// Gumroad sends price in cents as a string: \"1250\" means 12.50.\n\nconst MAX_REASON = 200;\n\nfunction maskEmail(value) {\n  const s = String(value || \"\");\n  const at = s.indexOf(\"@\");\n  if (at < 1) return \"\";\n  const user = s.slice(0, at);\n  const domain = s.slice(at + 1);\n  const head = user.slice(0, Math.min(2, user.length));\n  return head + \"*\".repeat(Math.max(1, user.length - head.length)) + \"@\" + domain;\n}\n\nfunction amountFromPrice(price) {\n  if (price === null || price === undefined || price === \"\") return null;\n  const n = Number(price);\n  if (!Number.isFinite(n) || n < 0) return null;\n  return Math.round(n) / 100;\n}\n\nfunction dateFrom(value) {\n  const d = new Date(value);\n  if (Number.isNaN(d.getTime())) {\n    return { iso: new Date().toISOString(), estimated: true };\n  }\n  return { iso: d.toISOString(), estimated: false };\n}\n\nfunction isEmail(value) {\n  const s = String(value || \"\").trim();\n  const at = s.indexOf(\"@\");\n  return at > 0 && at < s.length - 1 && s.indexOf(\" \") === -1;\n}\n\nfunction reject(reason, saleId, email) {\n  return {\n    status: \"REJECTED\",\n    reason: reason,\n    sale_id: String(saleId || \"\"),\n    email_masked: maskEmail(email),\n    fields: null,\n  };\n}\n\nfunction normalise(body) {\n  const saleId = String((body && body.sale_id) || \"\").trim();\n  if (!saleId) return reject(\"missing_sale_id\", \"\", \"\");\n\n  const email = String((body && body.email) || \"\").trim();\n  if (!isEmail(email)) return reject(\"invalid_email\", saleId, email);\n\n  const amount = amountFromPrice(body && body.price);\n  if (amount === null) return reject(\"price_not_a_number\", saleId, email);\n\n  const when = dateFrom(body && body.sale_timestamp);\n\n  return {\n    status: \"READY\",\n    reason: \"\",\n    sale_id: saleId,\n    email_masked: maskEmail(email),\n    date_estimated: when.estimated,\n    fields: {\n      sale_id: saleId,\n      email: email,\n      sold_at: when.iso,\n      amount: amount,\n      currency: String((body && body.currency) || \"usd\").toUpperCase(),\n      product_id: String((body && body.product_id) || \"\"),\n      product_name: String((body && body.product_name) || \"\"),\n      order_number: String((body && body.order_number) || \"\"),\n      country: String((body && body.ip_country) || \"\"),\n      test_sale: body && (body.test === true || body.test === \"true\"),\n    },\n  };\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const raw = item.json || {};\n  const body = raw.body !== undefined ? raw.body : raw;\n  out.push({ json: normalise(body) });\n}\nreturn out;"
+      },
+      "id": "normalise-and-validate",
+      "name": "Normalise and validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-ready",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "READY",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ready-to-write",
+      "name": "Ready to write?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $('Settings').first().json.base_id }}/{{ $('Settings').first().json.sales_table }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ performUpsert: { fieldsToMergeOn: ['sale_id'] }, records: [{ fields: $json.fields }], typecast: true }) }}",
+        "options": {
+          "timeout": 15000
+        },
+        "onError": "continueRegularOutput"
+      },
+      "id": "upsert-sale-row",
+      "name": "Upsert sale row",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        180
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide what the run log should say, based on what Airtable returned.\n// 429 and 5xx are worth retrying later. Other 4xx will never succeed: retrying\n// only piles up failed rows.\n\nconst MAX_REASON = 200;\n\nfunction classify(httpStatus, message) {\n  const code = Number(httpStatus) || 0;\n  const text = String(message || \"\");\n  if (code === 429) return { retryable: true, kind: \"TEMPORARY\", reason: \"rate_limited\" };\n  if (code >= 500) return { retryable: true, kind: \"TEMPORARY\", reason: \"server_error_\" + code };\n  if (code === 0 && /timeout|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i.test(text)) {\n    return { retryable: true, kind: \"TEMPORARY\", reason: \"network\" };\n  }\n  if (code >= 400) return { retryable: false, kind: \"PERMANENT\", reason: \"rejected_\" + code };\n  return { retryable: false, kind: \"PERMANENT\", reason: \"unknown_error\" };\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  const code = Number(j.statusCode) || 0;\n  const ok = code >= 200 && code < 300;\n  const info = ok\n    ? { retryable: false, kind: \"OK\", reason: \"\" }\n    : classify(code, j.error || j.message || \"\");\n\n  out.push({\n    json: {\n      sale_id: String(j.sale_id || \"\"),\n      email_masked: String(j.email_masked || \"\"),\n      action: ok ? \"WROTE_ROW\" : \"WRITE_FAILED\",\n      status: info.kind,\n      reason: String(info.reason).slice(0, MAX_REASON),\n      retryable: info.retryable,\n      attempts: 1,\n      at: new Date().toISOString(),\n    },\n  });\n}\nreturn out;"
+      },
+      "id": "classify-write-result",
+      "name": "Classify write result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log a rejected ping. The row still gets recorded, so a malformed sale is\n// visible instead of disappearing.\n\nconst MAX_REASON = 200;\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  out.push({\n    json: {\n      sale_id: String(j.sale_id || \"\"),\n      email_masked: String(j.email_masked || \"\"),\n      action: \"REJECTED_PING\",\n      status: \"REJECTED\",\n      reason: String(j.reason || \"\").slice(0, MAX_REASON),\n      retryable: false,\n      attempts: 1,\n      at: new Date().toISOString(),\n    },\n  });\n}\nreturn out;"
+      },
+      "id": "build-rejection-log",
+      "name": "Build rejection log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $('Settings').first().json.base_id }}/{{ $('Settings').first().json.log_table }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ records: [{ fields: $json }], typecast: true }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "append-run-log",
+      "name": "Append run log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "PLACEHOLDER",
+          "name": "Airtable API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "### Setup\n\n**1. Settings node**\nReplace `{{AIRTABLE_BASE_ID}}` with your base id (starts with `app`). Rename `Sales` and `Run Log` if your tables differ.\n\n**2. Credential**\nCreate an *HTTP Header Auth* credential:\n- Name: `Authorization`\n- Value: `Bearer YOUR_AIRTABLE_TOKEN`\nAttach it to both HTTP Request nodes.\n\n**3. Tables**\n`Sales` needs a `sale_id` field (single line text) for the upsert to match on. `Run Log` needs: `sale_id`, `email_masked`, `action`, `status`, `reason`, `retryable`, `attempts`, `at`.\n\n**4. Gumroad**\nSettings -> Advanced -> Ping. Paste the production webhook URL.",
+        "height": 420,
+        "width": 460
+      },
+      "id": "setup-notes",
+      "name": "Setup notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        620,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Reading the run log\n\n- `WROTE_ROW` / `OK` - the sale landed.\n- `WRITE_FAILED` / `TEMPORARY` - rate limit, server error or network. Safe to retry.\n- `WRITE_FAILED` / `PERMANENT` - Airtable refused it (bad field, revoked token). Retrying will not help.\n- `REJECTED_PING` - the ping itself was unusable (no `sale_id`, bad email, non-numeric price). The row is logged so a broken sale is visible.",
+        "height": 220,
+        "width": 460
+      },
+      "id": "what-the-log-tells-you",
+      "name": "What the log tells you",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        620,
+        560
+      ]
+    }
+  ],
+  "connections": {
+    "Gumroad sale ping": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Normalise and validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise and validate": {
+      "main": [
+        [
+          {
+            "node": "Ready to write?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready to write?": {
+      "main": [
+        [
+          {
+            "node": "Upsert sale row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build rejection log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert sale row": {
+      "main": [
+        [
+          {
+            "node": "Classify write result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify write result": {
+      "main": [
+        [
+          {
+            "node": "Append run log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build rejection log": {
+      "main": [
+        [
+          {
+            "node": "Append run log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

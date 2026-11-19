@@ -1,0 +1,600 @@
+{
+  "name": "Book studio classes from Telegram without double bookings",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Class booking bot for a studio\n\nStudents book classes from Telegram. The bot shows only slots that are still free, and **cannot double-book**: the database has a unique index on `(room_id, starts_at)`.\n\nCommands: `/slots` lists open classes as buttons, tapping one books it, `/cancel <id>` releases it.\n\nWhy a database instead of a spreadsheet: two people tapping the same slot at the same moment is exactly the case a spreadsheet cannot protect you from. `ON CONFLICT DO NOTHING` turns that race into a polite *\"that slot was just taken\"* instead of a duplicate row.",
+        "height": 330,
+        "width": 430
+      },
+      "id": "overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -280,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "telegram-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -260,
+        340
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER",
+          "name": "Studio bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"open_hour\": \"06:00\",\n  \"close_hour\": \"22:00\",\n  \"studio_name\": \"Studio\"\n}",
+        "options": {}
+      },
+      "id": "settings",
+      "name": "Settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -40,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn a Telegram update into one flat object the rest of the flow can route on.\n\nfunction pickMessage(u) {\n  if (u.message) return { kind: \"message\", msg: u.message, data: \"\" };\n  if (u.callback_query && u.callback_query.message) {\n    return { kind: \"callback\", msg: u.callback_query.message, data: String(u.callback_query.data || \"\") };\n  }\n  return null;\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const update = item.json || {};\n  const picked = pickMessage(update);\n  if (!picked) {\n    out.push({ json: { kind: \"ignore\" } });\n    continue;\n  }\n  const msg = picked.msg;\n  const text = String(msg.text || \"\").trim();\n  const command = text.startsWith(\"/\") ? text.split(/[\\s@]/)[0].toLowerCase() : \"\";\n\n  out.push({\n    json: {\n      kind: picked.kind,\n      command: command,\n      text: text,\n      data: picked.data,\n      chat_id: String((msg.chat && msg.chat.id) || \"\"),\n      user_id: String((update.callback_query && update.callback_query.from\n        ? update.callback_query.from.id\n        : (msg.from && msg.from.id)) || \"\"),\n      callback_id: String((update.callback_query && update.callback_query.id) || \"\"),\n    },\n  });\n}\nreturn out;"
+      },
+      "id": "parse-update",
+      "name": "Parse update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "slots",
+                    "leftValue": "={{ $json.command }}",
+                    "rightValue": "/slots",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "slots"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "book",
+                    "leftValue": "={{ $json.data }}",
+                    "rightValue": "book:",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "book"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "cancel",
+                    "leftValue": "={{ $json.command }}",
+                    "rightValue": "/cancel",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cancel"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "route",
+      "name": "Route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        400,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT class_id, class_name, room_id, seats,\n       to_char(starts_at, 'YYYY-MM-DD\"T\"HH24:MI:SSOF') AS starts_at_iso,\n       to_char(starts_at, 'HH24:MI') AS start_time,\n       to_char(starts_at + (duration_min || ' minutes')::interval, 'HH24:MI') AS end_time,\n       to_char(starts_at, 'Dy DD Mon HH24:MI') AS label\nFROM classes\nWHERE starts_at > now()\n  AND starts_at < now() + interval '7 days'\nORDER BY starts_at\nLIMIT 60;",
+        "options": {}
+      },
+      "id": "load-classes",
+      "name": "Load classes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        640,
+        160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER",
+          "name": "Studio database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT room_id,\n       to_char(starts_at, 'YYYY-MM-DD\"T\"HH24:MI:SSOF') AS starts_at\nFROM bookings\nWHERE status = 'confirmed'\n  AND starts_at > now() - interval '1 day'\n  AND starts_at < now() + interval '8 days';",
+        "options": {}
+      },
+      "id": "load-bookings",
+      "name": "Load bookings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        640,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER",
+          "name": "Studio database"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Work out which slots are still free.\n// A slot is free when no confirmed booking overlaps it in the same room.\n\nconst MAX_SLOTS = 24;\n\nfunction toMinutes(hhmm) {\n  const m = /^(\\d{1,2}):(\\d{2})$/.exec(String(hhmm || \"\").trim());\n  if (!m) return null;\n  const h = Number(m[1]), mi = Number(m[2]);\n  if (h > 23 || mi > 59) return null;\n  return h * 60 + mi;\n}\n\nfunction overlaps(aStart, aEnd, bStart, bEnd) {\n  return aStart < bEnd && bStart < aEnd;\n}\n\nfunction slotKey(roomId, ms) {\n  return roomId + \"|\" + ms;\n}\n\n// slot_id dipakai sebagai callback_data Telegram (batas 64 byte), jadi dibuat\n// pendek: classId|roomId|epoch-ms. Waktu disimpan sebagai epoch supaya tidak ada\n// perbedaan zona waktu antara sisi kelas dan sisi pemesanan.\nfunction makeSlotId(classId, roomId, ms) {\n  return classId + \"|\" + roomId + \"|\" + ms;\n}\n\nconst cfg = $(\"Settings\").first().json;\nconst openMin = toMinutes(cfg.open_hour) ?? 6 * 60;\nconst closeMin = toMinutes(cfg.close_hour) ?? 22 * 60;\n\n// Rantai: Load classes -> Load bookings -> node ini.\n// Jadi kelas diambil lewat referensi, dan $input berisi pemesanan.\nconst classes = [];\nfor (const item of $(\"Load classes\").all()) {\n  const j = item.json || {};\n  if (!j.class_id) continue;\n  classes.push(j);\n}\n\nconst bookings = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (!j.room_id || !j.starts_at) continue;\n  bookings.push(j);\n}\n\nconst diambil = new Set();\nfor (const b of bookings) {\n  const s = new Date(b.starts_at);\n  if (Number.isNaN(s.getTime())) continue;\n  // kunci memakai epoch milidetik, sama seperti sisi kelas di bawah.\n  // Kalau satu sisi memakai string +07:00 dan sisi lain UTC, bentrok tidak terdeteksi.\n  diambil.add(slotKey(String(b.room_id), s.getTime()));\n}\n\nconst bebas = [];\nfor (const c of classes) {\n  const mulai = toMinutes(c.start_time);\n  const selesai = toMinutes(c.end_time);\n  if (mulai === null || selesai === null || selesai <= mulai) continue;\n  if (mulai < openMin || selesai > closeMin) continue;\n\n  const waktu = new Date(c.starts_at_iso);\n  if (Number.isNaN(waktu.getTime())) continue;\n  const ms = waktu.getTime();\n  if (diambil.has(slotKey(String(c.room_id), ms))) continue;\n\n  bebas.push({\n    slot_id: makeSlotId(String(c.class_id), String(c.room_id), ms),\n    class_id: String(c.class_id),\n    room_id: String(c.room_id),\n    label: String(c.label || (c.class_name + \" - \" + c.start_time)),\n    starts_at: waktu.toISOString(),\n    seats: Number(c.seats) || 0,\n  });\n  if (bebas.length >= MAX_SLOTS) break;\n}\n\nreturn [{ json: { slots: bebas, jumlah: bebas.length, chat_id: cfg.chat_id || \"\" } }];"
+      },
+      "id": "compute-free-slots",
+      "name": "Compute free slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One button per free slot, packed two per row.\n// callback_data stays short: Telegram allows 64 bytes.\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  const slots = Array.isArray(j.slots) ? j.slots : [];\n\n  if (!slots.length) {\n    out.push({ json: { chat_id: j.chat_id, text:\n      \"No open slots right now. Try /slots again later, or ask the studio to add a class.\",\n      keyboard: { inline_keyboard: [] } } });\n    continue;\n  }\n\n  const baris = [];\n  for (let i = 0; i < slots.length; i += 2) {\n    const potong = slots.slice(i, i + 2).map(s => ({\n      text: String(s.label).slice(0, 30),\n      // jangan dipotong: slot_id yang terpotong akan gagal dicocokkan di SQL.\n      // Telegram membatasi 64 byte; format classId|roomId|epochMs aman di bawahnya.\n      callback_data: \"book:\" + String(s.slot_id),\n    }));\n    baris.push(potong);\n  }\n\n  out.push({ json: {\n    chat_id: j.chat_id,\n    text: \"Pick a class to book (\" + slots.length + \" open):\",\n    keyboard: { inline_keyboard: baris },\n  } });\n}\nreturn out;"
+      },
+      "id": "build-keyboard",
+      "name": "Build keyboard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": "={{ JSON.stringify($json.keyboard.inline_keyboard) }}",
+        "additionalFields": {}
+      },
+      "id": "send-slots",
+      "name": "Send slots",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1360,
+        220
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER",
+          "name": "Studio bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Read the slot id out of a button press, or a booking id out of /cancel.\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  const data = String(j.data || \"\");\n  const text = String(j.text || \"\");\n\n  let aksi = \"\", slotId = \"\", bookingId = \"\";\n\n  if (data.startsWith(\"book:\")) {\n    aksi = \"book\";\n    slotId = data.slice(5);\n  } else if (data.startsWith(\"cancel:\")) {\n    aksi = \"cancel\";\n    bookingId = data.slice(7);\n  } else if (j.command === \"/cancel\") {\n    aksi = \"cancel\";\n    bookingId = text.replace(/^\\/cancel\\s*/i, \"\").trim();\n  } else {\n    aksi = \"unknown\";\n  }\n\n  out.push({ json: {\n    action: aksi,\n    slot_id: slotId,\n    booking_id: bookingId,\n    chat_id: String(j.chat_id || \"\"),\n    user_id: String(j.user_id || \"\"),\n  } });\n}\nreturn out;"
+      },
+      "id": "parse-choice",
+      "name": "Parse choice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-book",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "book",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "is-booking",
+      "name": "Is booking?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        860,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- slot_id berbentuk classId|roomId|epochMs, jadi ketiga bagian harus cocok\n-- dengan baris kelas yang sebenarnya. Jangan percaya nilainya begitu saja.\n-- ON CONFLICT DO NOTHING: kalau ada yang menang lebih dulu, kembalian nol baris.\nINSERT INTO bookings (class_id, room_id, starts_at, chat_id, status)\nSELECT c.class_id, c.room_id, c.starts_at, {{ $json.chat_id }}, 'confirmed'\nFROM classes c\nWHERE c.class_id = split_part({{ $json.slot_id }}, '|', 1)\n  AND c.room_id  = split_part({{ $json.slot_id }}, '|', 2)\n  AND c.starts_at = to_timestamp(split_part({{ $json.slot_id }}, '|', 3)::bigint / 1000.0)\nON CONFLICT (room_id, starts_at) DO NOTHING\nRETURNING booking_id::text AS booking_id, room_id,\n          to_char(starts_at, 'Dy DD Mon HH24:MI') AS label;",
+        "options": {}
+      },
+      "id": "try-to-book",
+      "name": "Try to book",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1080,
+        360
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER",
+          "name": "Studio database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Did the insert actually create a row?\n// The unique constraint means a lost race returns zero rows instead of a duplicate.\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  const ok = Boolean(j.booking_id);\n\n  out.push({ json: {\n    ok: ok,\n    booking_id: String(j.booking_id || \"\"),\n    chat_id: String(j.chat_id || \"\"),\n    text: ok\n      ? \"Booked. Your booking id is \" + j.booking_id + \". Send /cancel \" + j.booking_id + \" to cancel.\"\n      : \"That slot was just taken by someone else. Send /slots to see what is still open.\",\n  } });\n}\nreturn out;"
+      },
+      "id": "check-booking",
+      "name": "Check booking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "id": "reply",
+      "name": "Reply",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1520,
+        360
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER",
+          "name": "Studio bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE bookings\nSET status = 'cancelled'\nWHERE booking_id = {{ $json.booking_id }}\n  AND chat_id = {{ $json.chat_id }}\n  AND status = 'confirmed'\nRETURNING booking_id::text AS booking_id;",
+        "options": {}
+      },
+      "id": "cancel-booking",
+      "name": "Cancel booking",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1080,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "PLACEHOLDER",
+          "name": "Studio database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Parse choice').item.json.chat_id }}",
+        "text": "={{ $json.booking_id ? 'Cancelled booking ' + $json.booking_id + '. The slot is open again.' : 'No confirmed booking with that id in this chat.' }}",
+        "additionalFields": {}
+      },
+      "id": "confirm-cancel",
+      "name": "Confirm cancel",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1300,
+        560
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "PLACEHOLDER",
+          "name": "Studio bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "### Database\n\nRun this once in your Postgres:\n\n```sql\nCREATE TABLE classes (\n  class_id     text PRIMARY KEY,\n  class_name   text NOT NULL,\n  room_id      text NOT NULL,\n  seats        int  NOT NULL DEFAULT 10,\n  starts_at    timestamptz NOT NULL,\n  duration_min int  NOT NULL DEFAULT 60\n);\n\nCREATE TABLE bookings (\n  booking_id bigserial PRIMARY KEY,\n  class_id   text NOT NULL,\n  room_id    text NOT NULL,\n  starts_at  timestamptz NOT NULL,\n  chat_id    text NOT NULL,\n  status     text NOT NULL DEFAULT 'confirmed'\n);\n\n-- this line is what makes double booking impossible\nCREATE UNIQUE INDEX one_booking_per_room_slot\n  ON bookings (room_id, starts_at)\n  WHERE status = 'confirmed';\n```\n\nThen attach your Postgres and Telegram credentials to every node that asks for one.",
+        "height": 470,
+        "width": 470
+      },
+      "id": "database-setup",
+      "name": "Database setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        620,
+        -380
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### The race you cannot see\n\nTwo students tap the same slot within the same second. Both runs read the slot as free, both decide it is available, both write.\n\nA spreadsheet will happily store two rows. The unique index rejects the second one, and `ON CONFLICT DO NOTHING` turns that into zero rows, which the **Check booking** node reports as *\"that slot was just taken\"*.\n\nThat is the whole reason this template uses Postgres.",
+        "height": 250,
+        "width": 420
+      },
+      "id": "why-not-a-spreadsheet",
+      "name": "Why not a spreadsheet",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        620
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Parse update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse update": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Load classes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse choice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse choice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load classes": {
+      "main": [
+        [
+          {
+            "node": "Load bookings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load bookings": {
+      "main": [
+        [
+          {
+            "node": "Compute free slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute free slots": {
+      "main": [
+        [
+          {
+            "node": "Build keyboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build keyboard": {
+      "main": [
+        [
+          {
+            "node": "Send slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse choice": {
+      "main": [
+        [
+          {
+            "node": "Is booking?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is booking?": {
+      "main": [
+        [
+          {
+            "node": "Try to book",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cancel booking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Try to book": {
+      "main": [
+        [
+          {
+            "node": "Check booking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check booking": {
+      "main": [
+        [
+          {
+            "node": "Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel booking": {
+      "main": [
+        [
+          {
+            "node": "Confirm cancel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
