@@ -3,17 +3,17 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Gumroad sale -> Airtable, without duplicates\n\nGumroad sends a **Ping** (webhook) on every sale. This workflow turns that ping into one Airtable row and writes a run log entry either way.\n\n**Why a webhook instead of polling:** nothing is missed between runs, and the row lands in seconds.\n\n**Why it never duplicates:** the write uses `performUpsert` on `sale_id`, so a retried delivery updates the same row instead of adding a second one.\n\nSet up: 1) open *Settings* and fill in your base and table names, 2) connect the Airtable header credential, 3) point Gumroad's Ping URL at this workflow's production URL.",
-        "height": 300,
-        "width": 420
+        "content": "## Gumroad sales to Airtable, without duplicates\n\n### How it works\nGumroad sends a Ping (webhook) on every sale. This workflow turns that ping into exactly one Airtable row, and writes a run log entry either way.\n\n**Gumroad sale ping** receives the form-encoded payload. **Settings** holds your base, table and field names. **Normalise and validate** checks the required fields, converts the price from cents, and builds the dedupe key. **Ready to write?** splits valid records from invalid ones. Valid records reach **Upsert sale row**, which uses `performUpsert` on `sale_id`, so a retried delivery updates the same row instead of adding a second one. Invalid records go to **Build rejection log** rather than disappearing. **Classify write result** decides what **Append run log** records.\n\nResult: one row per sale, plus a log that shows what happened on every run, including the runs that failed.\n\n### Setup\n1. Open **Settings** and fill in your Airtable base id, table name and field names.\n2. Connect the Airtable credential used by **Upsert sale row** and **Append run log**.\n3. In Gumroad, set the Ping URL to this workflow's production webhook URL.\n4. Create the log table in Airtable with the columns named in **Append run log**.\n\n### Customization\nAdd fields to the mapping in **Normalise and validate** if you collect more than email, price, product and timestamp. For subscriptions, keep `sale_id` as the dedupe key and add `resource_name`, so a refund is not mistaken for a new sale.",
+        "height": 480,
+        "width": 560
       },
       "id": "overview",
       "name": "Overview",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -260,
-        -80
+        -300,
+        -340
       ]
     },
     {
@@ -178,32 +178,50 @@
     },
     {
       "parameters": {
-        "content": "### Setup\n\n**1. Settings node**\nReplace `{{AIRTABLE_BASE_ID}}` with your base id (starts with `app`). Rename `Sales` and `Run Log` if your tables differ.\n\n**2. Credential**\nCreate an *HTTP Header Auth* credential:\n- Name: `Authorization`\n- Value: `Bearer YOUR_AIRTABLE_TOKEN`\nAttach it to both HTTP Request nodes.\n\n**3. Tables**\n`Sales` needs a `sale_id` field (single line text) for the upsert to match on. `Run Log` needs: `sale_id`, `email_masked`, `action`, `status`, `reason`, `retryable`, `attempts`, `at`.\n\n**4. Gumroad**\nSettings -> Advanced -> Ping. Paste the production webhook URL.",
-        "height": 420,
-        "width": 460
+        "content": "## Receive and validate\n\nWebhook receives the Ping, **Settings** holds your field names, **Normalise and validate** checks required fields and converts the price from cents.",
+        "height": 230,
+        "width": 720,
+        "color": 7
       },
-      "id": "setup-notes",
-      "name": "Setup notes",
+      "id": "bagian-receive-and-validate",
+      "name": "Receive and validate",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        620,
-        -320
+        -300,
+        170
       ]
     },
     {
       "parameters": {
-        "content": "### Reading the run log\n\n- `WROTE_ROW` / `OK` - the sale landed.\n- `WRITE_FAILED` / `TEMPORARY` - rate limit, server error or network. Safe to retry.\n- `WRITE_FAILED` / `PERMANENT` - Airtable refused it (bad field, revoked token). Retrying will not help.\n- `REJECTED_PING` - the ping itself was unusable (no `sale_id`, bad email, non-numeric price). The row is logged so a broken sale is visible.",
-        "height": 220,
-        "width": 460
+        "content": "## Write or reject\n\nValid records are upserted on `sale_id`. Invalid ones become a rejection entry, so a malformed sale leaves a trace instead of vanishing.",
+        "height": 250,
+        "width": 520,
+        "color": 7
       },
-      "id": "what-the-log-tells-you",
-      "name": "What the log tells you",
+      "id": "bagian-write-or-reject",
+      "name": "Write or reject",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        620,
-        560
+        600,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Log the run\n\n**Classify write result** decides the outcome and **Append run log** records it. Check this table when a sale looks missing.",
+        "height": 190,
+        "width": 460,
+        "color": 7
+      },
+      "id": "bagian-log-the-run",
+      "name": "Log the run",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        860,
+        40
       ]
     }
   ],

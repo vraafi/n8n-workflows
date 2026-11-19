@@ -3,17 +3,17 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Class booking bot for a studio\n\nStudents book classes from Telegram. The bot shows only slots that are still free, and **cannot double-book**: the database has a unique index on `(room_id, starts_at)`.\n\nCommands: `/slots` lists open classes as buttons, tapping one books it, `/cancel <id>` releases it.\n\nWhy a database instead of a spreadsheet: two people tapping the same slot at the same moment is exactly the case a spreadsheet cannot protect you from. `ON CONFLICT DO NOTHING` turns that race into a polite *\"that slot was just taken\"* instead of a duplicate row.",
-        "height": 330,
-        "width": 430
+        "content": "## Class booking bot for a studio\n\n### How it works\nStudents book classes from Telegram. **Incoming message** receives the update, **Settings** holds the chat and database settings, and **Parse update** decides whether this is `/slots`, a button tap, or `/cancel`.\n\nFor `/slots`, **Load classes** and **Load bookings** read the schedule and the existing bookings, **Compute free slots** removes the taken ones, **Build keyboard** turns the rest into buttons, and **Send slots** replies.\n\nFor a tap, **Parse choice** reads the chosen class, **Is booking?** splits booking from cancelling, and **Try to book** inserts the booking. A unique index on `(room_id, starts_at)` makes the second person to tap the same slot fail cleanly; **Check booking** then sends the polite \"that slot was just taken\" reply instead of creating a duplicate row.\n\n### Setup\n1. Create the tables and the unique index described in **Database setup**.\n2. Connect the Postgres credential and the Telegram credential.\n3. Fill in **Settings** with your chat id and time zone.\n4. Activate the workflow so the Telegram trigger registers its webhook.\n\n### Customization\nChange slot length and opening hours in **Compute free slots**. To send reminders, add a scheduled branch that reads the same bookings table.",
+        "height": 480,
+        "width": 560
       },
       "id": "overview",
       "name": "Overview",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -280,
-        -60
+        -300,
+        -340
       ]
     },
     {
@@ -25,7 +25,7 @@
         "additionalFields": {}
       },
       "id": "telegram-trigger",
-      "name": "Telegram Trigger",
+      "name": "Incoming message",
       "type": "n8n-nodes-base.telegramTrigger",
       "typeVersion": 1.1,
       "position": [
@@ -201,7 +201,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Work out which slots are still free.\n// A slot is free when no confirmed booking overlaps it in the same room.\n\nconst MAX_SLOTS = 24;\n\nfunction toMinutes(hhmm) {\n  const m = /^(\\d{1,2}):(\\d{2})$/.exec(String(hhmm || \"\").trim());\n  if (!m) return null;\n  const h = Number(m[1]), mi = Number(m[2]);\n  if (h > 23 || mi > 59) return null;\n  return h * 60 + mi;\n}\n\nfunction overlaps(aStart, aEnd, bStart, bEnd) {\n  return aStart < bEnd && bStart < aEnd;\n}\n\nfunction slotKey(roomId, ms) {\n  return roomId + \"|\" + ms;\n}\n\n// slot_id dipakai sebagai callback_data Telegram (batas 64 byte), jadi dibuat\n// pendek: classId|roomId|epoch-ms. Waktu disimpan sebagai epoch supaya tidak ada\n// perbedaan zona waktu antara sisi kelas dan sisi pemesanan.\nfunction makeSlotId(classId, roomId, ms) {\n  return classId + \"|\" + roomId + \"|\" + ms;\n}\n\nconst cfg = $(\"Settings\").first().json;\nconst openMin = toMinutes(cfg.open_hour) ?? 6 * 60;\nconst closeMin = toMinutes(cfg.close_hour) ?? 22 * 60;\n\n// Rantai: Load classes -> Load bookings -> node ini.\n// Jadi kelas diambil lewat referensi, dan $input berisi pemesanan.\nconst classes = [];\nfor (const item of $(\"Load classes\").all()) {\n  const j = item.json || {};\n  if (!j.class_id) continue;\n  classes.push(j);\n}\n\nconst bookings = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (!j.room_id || !j.starts_at) continue;\n  bookings.push(j);\n}\n\nconst diambil = new Set();\nfor (const b of bookings) {\n  const s = new Date(b.starts_at);\n  if (Number.isNaN(s.getTime())) continue;\n  // kunci memakai epoch milidetik, sama seperti sisi kelas di bawah.\n  // Kalau satu sisi memakai string +07:00 dan sisi lain UTC, bentrok tidak terdeteksi.\n  diambil.add(slotKey(String(b.room_id), s.getTime()));\n}\n\nconst bebas = [];\nfor (const c of classes) {\n  const mulai = toMinutes(c.start_time);\n  const selesai = toMinutes(c.end_time);\n  if (mulai === null || selesai === null || selesai <= mulai) continue;\n  if (mulai < openMin || selesai > closeMin) continue;\n\n  const waktu = new Date(c.starts_at_iso);\n  if (Number.isNaN(waktu.getTime())) continue;\n  const ms = waktu.getTime();\n  if (diambil.has(slotKey(String(c.room_id), ms))) continue;\n\n  bebas.push({\n    slot_id: makeSlotId(String(c.class_id), String(c.room_id), ms),\n    class_id: String(c.class_id),\n    room_id: String(c.room_id),\n    label: String(c.label || (c.class_name + \" - \" + c.start_time)),\n    starts_at: waktu.toISOString(),\n    seats: Number(c.seats) || 0,\n  });\n  if (bebas.length >= MAX_SLOTS) break;\n}\n\nreturn [{ json: { slots: bebas, jumlah: bebas.length, chat_id: cfg.chat_id || \"\" } }];"
+        "jsCode": "// Work out which slots are still free.\n// A slot is free when no confirmed booking overlaps it in the same room.\n\nconst MAX_SLOTS = 24;\n\nfunction toMinutes(hhmm) {\n  const m = /^(\\d{1,2}):(\\d{2})$/.exec(String(hhmm || \"\").trim());\n  if (!m) return null;\n  const h = Number(m[1]), mi = Number(m[2]);\n  if (h > 23 || mi > 59) return null;\n  return h * 60 + mi;\n}\n\nfunction overlaps(aStart, aEnd, bStart, bEnd) {\n  return aStart < bEnd && bStart < aEnd;\n}\n\nfunction slotKey(roomId, ms) {\n  return roomId + \"|\" + ms;\n}\n\n// slot_id is used as Telegram callback_data (64-byte limit), so keep it\n// short: classId|roomId|epoch-ms. Time is stored as epoch so there is no\n// timezone mismatch between the class side and the booking side.\nfunction makeSlotId(classId, roomId, ms) {\n  return classId + \"|\" + roomId + \"|\" + ms;\n}\n\nconst cfg = $(\"Settings\").first().json;\nconst openMin = toMinutes(cfg.open_hour) ?? 6 * 60;\nconst closeMin = toMinutes(cfg.close_hour) ?? 22 * 60;\n\n// Chain: Load classes -> Load bookings -> this node.\n// Classes are read by reference, and $input holds the bookings.\nconst classes = [];\nfor (const item of $(\"Load classes\").all()) {\n  const j = item.json || {};\n  if (!j.class_id) continue;\n  classes.push(j);\n}\n\nconst bookings = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  if (!j.room_id || !j.starts_at) continue;\n  bookings.push(j);\n}\n\nconst taken = new Set();\nfor (const b of bookings) {\n  const s = new Date(b.starts_at);\n  if (Number.isNaN(s.getTime())) continue;\n  // key uses epoch milliseconds, same as the class side below.\n  // If one side uses a +07:00 string and the other UTC, a clash goes undetected.\n  taken.add(slotKey(String(b.room_id), s.getTime()));\n}\n\nconst freeSlots = [];\nfor (const c of classes) {\n  const startMin = toMinutes(c.start_time);\n  const endMin = toMinutes(c.end_time);\n  if (startMin === null || endMin === null || endMin <= startMin) continue;\n  if (startMin < openMin || endMin > closeMin) continue;\n\n  const when = new Date(c.starts_at_iso);\n  if (Number.isNaN(when.getTime())) continue;\n  const ms = when.getTime();\n  if (taken.has(slotKey(String(c.room_id), ms))) continue;\n\n  freeSlots.push({\n    slot_id: makeSlotId(String(c.class_id), String(c.room_id), ms),\n    class_id: String(c.class_id),\n    room_id: String(c.room_id),\n    label: String(c.label || (c.class_name + \" - \" + c.start_time)),\n    starts_at: when.toISOString(),\n    seats: Number(c.seats) || 0,\n  });\n  if (freeSlots.length >= MAX_SLOTS) break;\n}\n\nreturn [{ json: { slots: freeSlots, count: freeSlots.length, chat_id: cfg.chat_id || \"\" } }];"
       },
       "id": "compute-free-slots",
       "name": "Compute free slots",
@@ -214,7 +214,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// One button per free slot, packed two per row.\n// callback_data stays short: Telegram allows 64 bytes.\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  const slots = Array.isArray(j.slots) ? j.slots : [];\n\n  if (!slots.length) {\n    out.push({ json: { chat_id: j.chat_id, text:\n      \"No open slots right now. Try /slots again later, or ask the studio to add a class.\",\n      keyboard: { inline_keyboard: [] } } });\n    continue;\n  }\n\n  const baris = [];\n  for (let i = 0; i < slots.length; i += 2) {\n    const potong = slots.slice(i, i + 2).map(s => ({\n      text: String(s.label).slice(0, 30),\n      // jangan dipotong: slot_id yang terpotong akan gagal dicocokkan di SQL.\n      // Telegram membatasi 64 byte; format classId|roomId|epochMs aman di bawahnya.\n      callback_data: \"book:\" + String(s.slot_id),\n    }));\n    baris.push(potong);\n  }\n\n  out.push({ json: {\n    chat_id: j.chat_id,\n    text: \"Pick a class to book (\" + slots.length + \" open):\",\n    keyboard: { inline_keyboard: baris },\n  } });\n}\nreturn out;"
+        "jsCode": "// One button per free slot, packed two per row.\n// callback_data stays short: Telegram allows 64 bytes.\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json || {};\n  const slots = Array.isArray(j.slots) ? j.slots : [];\n\n  if (!slots.length) {\n    out.push({ json: { chat_id: j.chat_id, text:\n      \"No open slots right now. Try /slots again later, or ask the studio to add a class.\",\n      keyboard: { inline_keyboard: [] } } });\n    continue;\n  }\n\n  const rows = [];\n  for (let i = 0; i < slots.length; i += 2) {\n    const pair = slots.slice(i, i + 2).map(s => ({\n      text: String(s.label).slice(0, 30),\n      // do not truncate: a truncated slot_id will not match in SQL.\n      // Telegram caps callback_data at 64 bytes; classId|roomId|epochMs fits.\n      callback_data: \"book:\" + String(s.slot_id),\n    }));\n    rows.push(pair);\n  }\n\n  out.push({ json: {\n    chat_id: j.chat_id,\n    text: \"Pick a class to book (\" + slots.length + \" open):\",\n    keyboard: { inline_keyboard: rows },\n  } });\n}\nreturn out;"
       },
       "id": "build-keyboard",
       "name": "Build keyboard",
@@ -297,7 +297,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- slot_id berbentuk classId|roomId|epochMs, jadi ketiga bagian harus cocok\n-- dengan baris kelas yang sebenarnya. Jangan percaya nilainya begitu saja.\n-- ON CONFLICT DO NOTHING: kalau ada yang menang lebih dulu, kembalian nol baris.\nINSERT INTO bookings (class_id, room_id, starts_at, chat_id, status)\nSELECT c.class_id, c.room_id, c.starts_at, {{ $json.chat_id }}, 'confirmed'\nFROM classes c\nWHERE c.class_id = split_part({{ $json.slot_id }}, '|', 1)\n  AND c.room_id  = split_part({{ $json.slot_id }}, '|', 2)\n  AND c.starts_at = to_timestamp(split_part({{ $json.slot_id }}, '|', 3)::bigint / 1000.0)\nON CONFLICT (room_id, starts_at) DO NOTHING\nRETURNING booking_id::text AS booking_id, room_id,\n          to_char(starts_at, 'Dy DD Mon HH24:MI') AS label;",
+        "query": "-- slot_id is classId|roomId|epochMs, so all three parts must match a real row.\n-- Never trust the values from the button: they arrive from the client.\n-- ON CONFLICT DO NOTHING: if another user wins the race, zero rows come back.\nINSERT INTO bookings (class_id, room_id, starts_at, chat_id, status)\nSELECT c.class_id, c.room_id, c.starts_at, {{ $json.chat_id }}, 'confirmed'\nFROM classes c\nWHERE c.class_id = split_part({{ $json.slot_id }}, '|', 1)\n  AND c.room_id  = split_part({{ $json.slot_id }}, '|', 2)\n  AND c.starts_at = to_timestamp(split_part({{ $json.slot_id }}, '|', 3)::bigint / 1000.0)\nON CONFLICT (room_id, starts_at) DO NOTHING\nRETURNING booking_id::text AS booking_id, room_id,\n          to_char(starts_at, 'Dy DD Mon HH24:MI') AS label;",
         "options": {}
       },
       "id": "try-to-book",
@@ -420,20 +420,57 @@
         1100,
         620
       ]
+    },
+    {
+      "parameters": {
+        "content": "## Handle the update\n\n**Incoming message** receives the update. **Parse update** decides whether it is `/slots`, a button tap, or `/cancel`.",
+        "height": 210,
+        "width": 700,
+        "color": 7
+      },
+      "id": "section-handle-the-update",
+      "name": "Handle the update",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -300,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Show free slots\n\nReads classes and bookings, removes taken slots, then sends the free ones as buttons.",
+        "height": 260,
+        "width": 820,
+        "color": 7
+      },
+      "id": "section-show-free-slots",
+      "name": "Show free slots",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        620,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Book or cancel\n\n**Try to book** relies on a unique index, so a second tap on the same slot fails cleanly. **Check booking** sends the reply.",
+        "height": 290,
+        "width": 960,
+        "color": 7
+      },
+      "id": "section-book-or-cancel",
+      "name": "Book or cancel",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        620,
+        330
+      ]
     }
   ],
   "connections": {
-    "Telegram Trigger": {
-      "main": [
-        [
-          {
-            "node": "Settings",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Settings": {
       "main": [
         [
@@ -581,6 +618,17 @@
         [
           {
             "node": "Confirm cancel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Incoming message": {
+      "main": [
+        [
+          {
+            "node": "Settings",
             "type": "main",
             "index": 0
           }

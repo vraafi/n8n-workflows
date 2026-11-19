@@ -10,6 +10,17 @@ against edge cases before it went in here. No credentials are included.
 | [Record sales in Airtable without duplicates](workflows/webhook-to-airtable.json) | 12 cases | [video](media/demo_webhook.mp4) |
 | [Telegram class booking that cannot double-book](workflows/telegram-class-booking.json) | 11 cases | [video](media/demo_booking.mp4) |
 
+## Also in this repo, not counted above
+
+[News to draft — Google News + OpenAI](workflows/berita-ke-draf.json) is the
+workflow I use for AI drafting: it reads a news feed on a schedule, drops
+stories it has already seen, and asks a model for a structured draft it can put
+in a sheet.
+
+It is deliberately **not** in the table above. The 47 cases were run against a
+numbered test matrix I kept; this one was not, so counting it would overstate
+what is here. Read it for the pattern, not for a test count.
+
 ## Why the tests matter
 
 Most shared workflows are exported from a canvas that was never run. The three

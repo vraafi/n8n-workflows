@@ -27,7 +27,7 @@
     {
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "{\n  \"sheet_id\": \"{{SHEET_ID}}\",\n  \"sheet_name\": \"{{SHEET_NAME}}\",\n  \"sender_email\": \"{{SENDER_EMAIL}}\",\n  \"due_days\": 3,\n  \"message_template\": \"Hi {{name}}, a friendly reminder that {{item}} is now {{days}} days past its due date. Let me know if you need a copy of the invoice or a revised payment date.\",\n  \"subject_template\": \"Reminder: {{item}} is past due\"\n}",
+        "jsonOutput": "{\n  \"sheet_id\": \"{{SHEET_ID}}\",\n  \"sheet_name\": \"{{SHEET_NAME}}\",\n  \"sender_email\": \"{{SENDER_EMAIL}}\",\n  \"due_days\": 3,\n  \"subject_template\": \"Past due: {{item}}\",\n  \"message_template\": \"Hi {{name}},\\n\\na friendly reminder that the following is past its due date:\\n\\n{{invoice_list}}\\n\\nCould you let me know when payment is planned? If you need a copy of any invoice, or a revised payment date, just reply to this email.\\n\\nThanks!\",\n  \"invoice_list_template\": \"- {{item}} ({{days}} days overdue)\"\n}",
         "options": {}
       },
       "id": "e27b89e8-7083-534f-9be3-6adb678ed34f",
@@ -74,7 +74,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Domain-neutral. MISI N fixes three defects found by clean-room testing:\n//  (1) The old version DROPPED every non-due row, so the If node's FALSE\n//      output could never fire. Every row now leaves this node with an\n//      explicit needs_action boolean, and both If outputs are reachable.\n//  (2) Duplicate record_id values produced duplicate outbound messages.\n//      A stable row key now de-duplicates the input before any send.\n//  (3) A retry after a successful write-back re-sent the same message.\n//      Terminal statuses are skipped, and Mark Contacted writes a terminal\n//      status so the second run is a no-op.\nconst cfg = $('CONFIG').first().json;\nconst batas = Number(cfg.due_days || 3);\nconst terminal = new Set(['done', 'contacted', 'sent', 'complete', 'completed', 'paid']);\nconst seen = new Set();\nconst keluar = [];\nfor (const item of $input.all()) {\n  const p = item.json;\n  const key = String(p.record_id !== undefined && p.record_id !== null\n    ? p.record_id : (String(p.email) + '|' + String(p.item_ref)));\n  if (seen.has(key)) continue;\n  seen.add(key);\n  const status = String(p.status || '').toLowerCase();\n  const t = new Date(String(p.last_activity) + 'T00:00:00Z').getTime();\n  const days = Number.isFinite(t) ? Math.max(0, Math.floor((Date.now() - t) / 86400000)) : 0;\n  const needs = !terminal.has(status) && days >= batas;\n  keluar.push({ json: Object.assign({}, p, { days_since: days, needs_action: needs }) });\n}\nreturn keluar;"
+        "jsCode": "// Domain-neutral row shaping. Three defects found by testing are fixed here:\n//  (1) The first version DROPPED every non-due row, so the FALSE output of the\n//      If node could never fire. Every row now leaves this node with an\n//      explicit needs_action boolean, so both outputs are reachable.\n//  (2) Duplicate record_id values produced duplicate outbound messages.\n//      A stable row key de-duplicates the input before anything is sent.\n//  (3) A retry after a successful write-back re-sent the same message.\n//      Terminal statuses are skipped, and the write-back sets a terminal\n//      status, so the second run is a no-op.\nconst cfg = $('CONFIG').first().json;\nconst threshold = Number(cfg.due_days || 3);\nconst terminal = new Set(['done', 'contacted', 'sent', 'complete', 'completed', 'paid']);\nconst seen = new Set();\nconst output = [];\n\nfor (const item of $input.all()) {\n  const p = item.json;\n  const key = String(p.record_id !== undefined && p.record_id !== null\n    ? p.record_id\n    : String(p.email) + '|' + String(p.item_ref));\n  if (seen.has(key)) continue;\n  seen.add(key);\n\n  const status = String(p.status || '').toLowerCase();\n  const stamp = new Date(String(p.last_activity) + 'T00:00:00Z').getTime();\n  const days = Number.isFinite(stamp)\n    ? Math.max(0, Math.floor((Date.now() - stamp) / 86400000))\n    : 0;\n\n  output.push({\n    json: Object.assign({}, p, {\n      days_since: days,\n      needs_action: !terminal.has(status) && days >= threshold\n    })\n  });\n}\n\nreturn output;\n"
       },
       "id": "199a2908-c194-50c2-864c-ad4e6fbbb1e2",
       "name": "Compute Due Rows",
@@ -123,14 +123,29 @@
     },
     {
       "parameters": {
-        "jsCode": "// Generic token merge: the node does not know which domain it is serving.\nconst cfg = $('CONFIG').first().json;\nconst tpl = String(cfg.message_template || '');\nconst subjTpl = String(cfg.subject_template || '');\nconst peta = { name: 'contact_name', item: 'item_ref', days: 'days_since' };\nconst isi = function (s, p) {\n  return String(s).replace(/\\{\\{([a-z_]+)\\}\\}/g, function (m, k) {\n    const f = peta[k];\n    return (f && p[f] !== undefined && p[f] !== null) ? String(p[f]) : m;\n  });\n};\nreturn $input.all().map(function (item) {\n  const p = item.json;\n  return { json: Object.assign({}, p, {\n    recipient: p.email,\n    subject: isi(subjTpl, p),\n    message: isi(tpl, p)\n  }) };\n});"
+        "jsCode": "// Collapse due rows into one item per email address.\n// Keying on the address (not the name) is deliberate: the address is the\n// delivery channel, so two spellings of the same client still get one email.\nconst order = [];\nconst groups = new Map();\n\nfor (const item of $input.all()) {\n  const p = item.json;\n  const email = String(p.email || '').trim().toLowerCase();\n  // No address means no email. The row is left untouched in the sheet so it\n  // stays visible instead of being silently marked as handled.\n  if (!email) continue;\n\n  let g = groups.get(email);\n  if (!g) {\n    g = { email: email, name: String(p.contact_name || '').trim(), rows: [], max_days: 0 };\n    groups.set(email, g);\n    order.push(email);\n  }\n  if (!g.name && p.contact_name) g.name = String(p.contact_name).trim();\n\n  g.rows.push({\n    record_id: p.record_id,\n    row_number: p.row_number,\n    item_ref: p.item_ref,\n    days_since: Number(p.days_since) || 0\n  });\n  g.max_days = Math.max(g.max_days, Number(p.days_since) || 0);\n}\n\nreturn order.map(function (k) {\n  const g = groups.get(k);\n  return {\n    json: {\n      recipient: g.email,\n      contact_name: g.name,\n      invoice_count: g.rows.length,\n      max_days: g.max_days,\n      rows: g.rows\n    }\n  };\n});\n"
+      },
+      "id": "nfvis-group-by-contact",
+      "name": "Group by Contact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1240,
+        430
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Collapses the due rows into one item per client address, so nobody receives three emails for three invoices."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One message per contact, built from the grouped item.\n// A single invoice keeps its own reference in the subject; a batch is described\n// as \"3 invoices\". The list itself is always spelled out in the body, so the\n// client can see every invoice in one place.\nconst cfg = $('CONFIG').first().json;\nconst subjTpl = String(cfg.subject_template || '');\nconst bodyTpl = String(cfg.message_template || '');\nconst listTpl = String(cfg.invoice_list_template || '- {{item}} ({{days}} days overdue)');\n\nconst fill = function (s, v) {\n  return String(s).replace(/\\{\\{([a-z_]+)\\}\\}/g, function (m, k) {\n    return v[k] !== undefined && v[k] !== null ? String(v[k]) : m;\n  });\n};\n\nreturn $input.all().map(function (item) {\n  const g = item.json;\n  const rows = g.rows || [];\n  const count = rows.length;\n  const list = rows\n    .map(function (r) { return fill(listTpl, { item: r.item_ref, days: r.days_since }); })\n    .filter(function (line) { return String(line).trim() !== ''; })\n    .join('\\n');\n\n  const vars = {\n    name: g.contact_name || 'there',\n    item: count === 1 ? String(rows[0].item_ref) : count + ' invoices',\n    days: String(g.max_days),\n    count: String(count),\n    invoice_list: list\n  };\n\n  return {\n    json: Object.assign({}, g, {\n      recipient: g.recipient,\n      subject: fill(subjTpl, vars),\n      message: fill(bodyTpl, vars)\n    })\n  };\n});\n"
       },
       "id": "67fece82-aaee-5039-ba33-993caee2c26a",
       "name": "Build Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1240,
+        1440,
         430
       ],
       "onError": "continueErrorOutput",
@@ -148,7 +163,7 @@
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
       "position": [
-        1460,
+        1640,
         430
       ],
       "disabled": true,
@@ -160,6 +175,21 @@
         }
       },
       "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "rows",
+        "options": {}
+      },
+      "id": "nfvis-one-row-per-invoice",
+      "name": "One Row per Invoice",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1840,
+        430
+      ],
+      "notes": "The email was sent once per client; this restores one item per invoice so every row can be marked as contacted."
     },
     {
       "parameters": {
@@ -179,7 +209,39 @@
           "value": {
             "status": "done",
             "last_activity": "={{ $now.toISODate() }}"
-          }
+          },
+          "matchingColumns": [
+            "record_id"
+          ],
+          "schema": [
+            {
+              "id": "record_id",
+              "displayName": "record_id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "last_activity",
+              "displayName": "last_activity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ]
         },
         "options": {}
       },
@@ -188,7 +250,7 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.5,
       "position": [
-        1680,
+        2040,
         430
       ],
       "disabled": true,
@@ -219,7 +281,7 @@
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        1900,
+        2260,
         430
       ]
     },
@@ -240,23 +302,22 @@
     },
     {
       "parameters": {
-        "content": "### How it works\n**Job:** Send the polite reminder that freelancers keep postponing.\n\n1. **Daily Schedule** fires once a day at 08:00.\n2. **CONFIG** holds the sheet id, the sheet name, the sender address, `due_days` and both message templates. It is the only node you edit.\n3. **Read Rows** reads every row of the invoice sheet.\n4. **Compute Due Rows** keeps every row but adds `days_since` and a `needs_action` flag: a row is due when it is an invoice whose `last_activity` is older than `due_days` days and is still unpaid. Duplicate `record_id` values are dropped and rows already marked done are skipped.\n5. **Any Due?** routes rows with `needs_action = true` to the email branch; every other row ends at **No Action**.\n6. **Build Message** fills `{{name}}`, `{{item}}` and `{{days}}` from the row and sets the recipient from the `email` column.\n7. **Send Email** sends one Gmail per row, then **Mark Contacted** writes `status = done` and today's date back to the sheet.\n\n### Setup\n1. Attach a Google Sheets credential to **Read Rows** and **Mark Contacted**, and a Gmail credential to **Send Email**.\n2. Enable those three nodes. They ship deactivated so nothing is sent before you are ready.\n3. In **CONFIG** replace `{{SHEET_ID}}`, `{{SHEET_NAME}}` and `{{SENDER_EMAIL}}`.\n4. The sheet needs the columns `record_id`, `contact_name`, `email`, `item_ref`, `last_activity` and `status`.\n5. Run once by hand, check the sheet, then activate.\n\n### Customization\n`due_days` doubles as your grace period after the invoice date: 3 is friendly, 7 is lenient. `paid` is already a terminal status, so a paid invoice is never chased.",
-        "height": 700,
-        "width": 940,
-        "color": 1
+        "content": "### How it works\n**Job:** Send the polite reminder that freelancers keep postponing, one email per client instead of one per invoice.\n\n1. **Daily Schedule** fires daily at 08:00.\n2. **CONFIG** holds the sheet id, the sheet name, `due_days` and the three templates. It is the only node you edit.\n3. **Read Rows** reads every row of the invoice sheet.\n4. **Compute Due Rows** keeps every row but adds `days_since` and a `needs_action` flag: due means `last_activity` is older than `due_days` days and the status is not terminal. Duplicate `record_id` values are dropped.\n5. **Any Due?** routes due rows to the email branch; every other row ends at **No Action**.\n6. **Group by Contact** collapses those rows into one item per email address, so a client with three overdue invoices is contacted once, not three times. Rows without an address are left untouched.\n7. **Build Message** fills `{{name}}`, `{{item}}`, `{{days}}`, `{{count}}` and `{{invoice_list}}` from the group and produces one message per client.\n8. **Send Email** sends that single Gmail, then **One Row per Invoice** expands the group again and **Mark Contacted** stamps each row `status = done` with today's date.\n\n### Setup\n1. Attach a Google Sheets credential to **Read Rows** and **Mark Contacted**, and a Gmail credential to **Send Email**.\n2. Enable those three nodes. They ship deactivated so nothing is sent before you are ready.\n3. In **CONFIG** replace `{{SHEET_ID}}`, `{{SHEET_NAME}}` and `{{SENDER_EMAIL}}`.\n4. The sheet needs the columns `record_id`, `contact_name`, `email`, `item_ref`, `last_activity` and `status`.\n5. Run once by hand, check the sheet, then activate.\n\n### Customization\n`due_days` is your grace period: 3 is friendly, 7 is lenient. `invoice_list_template` controls one line per invoice. `paid` is terminal, so a paid invoice is never chased.",
+        "height": 480,
+        "width": 620
       },
       "id": "nfvis-overview",
       "name": "Overview",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -20,
-        -440
+        -300,
+        -340
       ]
     },
     {
       "parameters": {
-        "content": "### 1 - Trigger and configuration\n**Daily Schedule** fires at 08:00. **CONFIG** is the only node you edit: sheet id, sheet name, sender address, `due_days` and the two templates.",
+        "content": "### 1 - Trigger and configuration\n**Daily Schedule** fires at 08:00. **CONFIG** is the only node you edit: sheet id, sheet name, `due_days` and the three templates.",
         "height": 130,
         "width": 440,
         "color": 7
@@ -288,13 +349,13 @@
     },
     {
       "parameters": {
-        "content": "### 3 - Compose, send, record\nOne Gmail per due row, then the row is stamped `status = done` with today's date. **Done** marks the end of the happy path.",
+        "content": "### 3 - One email per client\n**Group by Contact** merges a client's invoices, **Build Message** writes a single email listing them, and each row is stamped `status = done` afterwards.",
         "height": 130,
-        "width": 900,
+        "width": 1080,
         "color": 7
       },
       "id": "nfvis-3-compose-send-record",
-      "name": "3 - Compose, send, record",
+      "name": "3 - One email per client",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
@@ -330,7 +391,7 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        1520,
+        1980,
         -320
       ]
     }
@@ -398,7 +459,7 @@
       "main": [
         [
           {
-            "node": "Build Message",
+            "node": "Group by Contact",
             "type": "main",
             "index": 0
           }
@@ -434,7 +495,7 @@
       "main": [
         [
           {
-            "node": "Mark Contacted",
+            "node": "One Row per Invoice",
             "type": "main",
             "index": 0
           }
@@ -460,6 +521,35 @@
         [
           {
             "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group by Contact": {
+      "main": [
+        [
+          {
+            "node": "Build Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Row per Invoice": {
+      "main": [
+        [
+          {
+            "node": "Mark Contacted",
             "type": "main",
             "index": 0
           }

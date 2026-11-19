@@ -1,0 +1,465 @@
+{
+  "name": "Berita ke draf narasi",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Berita -> draf narasi\n\n**Alurnya:** Google News RSS -> saring yang masih segar dan relevan -> buang yang\nsudah pernah dipakai -> minta LLM menulis tiga bagian (pemicu, sudut pandang,\najakan) -> simpan sebagai draf.\n\n**Kenapa draf, bukan langsung terbit:** platform membatasi dan menghukum\npenayangan otomatis. Draf di antrean bisa diperiksa 10 detik, lalu terbit manual\natau lewat penjadwal resmi.\n\n**Yang membuat ini bukan sekadar template biasa:** ada penyaring umur berita,\npenyaring kata kunci, dan dedupe berbasis sidik. Tanpa ketiganya, alur seperti\nini akan membanjiri antrean dengan berita lama dan berita kembar.",
+        "height": 340,
+        "width": 560,
+        "color": 7
+      },
+      "id": "Overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Yang harus diisi sebelum jalan\n\n1. **CONFIG**\n   - `kueri` - kueri Google News apa adanya, boleh pakai `OR` dan tanda kutip.\n     Contoh: `\"AI agents\" OR \"workflow automation\"`.\n   - `jendela` - biarkan `2d`. **Ini bukan hiasan.** Tanpa pembatas `when:`,\n     Google News mengembalikan berita berumur berminggu-minggu. Diuji: kata\n     kunci `n8n` saja memberi item termuda berumur 30 hari, sedangkan dengan\n     `when:2d` item termuda berumur 18 menit.\n   - `kata_kunci` - saringan lokal, dipisah koma. Ini yang membuang berita yang\n     lolos dari Google tapi tidak nyambung.\n2. **Kredensial OpenAI** - pasang di node \"Write the draft\" (Header Auth,\n   nama header `Authorization`, nilai `Bearer sk-...`).\n3. **Google Sheets** - satu spreadsheet, dua tab:\n   - `seen` dengan kolom `sidik`\n   - `drafts` dengan kolom `judul, sumber, tautan, terbit, pemicu, sudut, ajakan, dibuat`\n4. Ganti `SHEET_ID_DI_SINI` di ketiga node Sheets.\n\nKalau `seen` kosong, alur tetap jalan - hanya belum ada yang dibuang.",
+        "height": 320,
+        "width": 560,
+        "color": 5
+      },
+      "id": "Setup",
+      "name": "Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 3
+            }
+          ]
+        }
+      },
+      "id": "trig-berita",
+      "name": "Every 3 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a0",
+              "name": "kueri",
+              "value": "\"AI agents\" OR \"workflow automation\" OR \"AI automation\"",
+              "type": "string"
+            },
+            {
+              "id": "a6",
+              "name": "jendela",
+              "value": "2d",
+              "type": "string"
+            },
+            {
+              "id": "a1",
+              "name": "kata_kunci",
+              "value": "agent, automation, otomasi, workflow",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "maks_umur_jam",
+              "value": 48,
+              "type": "number"
+            },
+            {
+              "id": "a3",
+              "name": "maks_item",
+              "value": 1,
+              "type": "number"
+            },
+            {
+              "id": "a4",
+              "name": "bahasa",
+              "value": "id",
+              "type": "string"
+            },
+            {
+              "id": "a5",
+              "name": "gaya",
+              "value": "Kamu penulis konten untuk praktisi otomasi n8n di Indonesia. Tulis dalam Bahasa Indonesia yang wajar, bukan bahasa iklan. Kembalikan HANYA JSON valid dengan tiga kunci: \"pemicu\" (2 kalimat merangkum berita, tanpa mengganti fakta), \"sudut\" (2-3 kalimat: apa implikasinya bagi orang yang menjalankan otomasi, sebutkan hal teknis yang spesifik), \"ajakan\" (1 kalimat penutup, tanpa jualan berlebihan, tanpa emoji, tanpa tanda seru). Jangan mengarang angka atau kutipan yang tidak ada di berita.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cfg-berita",
+      "name": "CONFIG",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://news.google.com/rss/search?q={{ encodeURIComponent($json.kueri) }}+when:{{ $json.jendela }}&hl={{ $json.bahasa === 'id' ? 'id' : 'en-US' }}&gl={{ $json.bahasa === 'id' ? 'ID' : 'US' }}&ceid={{ $json.bahasa === 'id' ? 'ID:id' : 'US:en' }}",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "rss-berita",
+      "name": "Google News RSS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ambil item dari RSS Google News, saring yang masih segar dan relevan.\n// Google News tidak punya API resmi; RSS ini yang dipakai, dan terbukti hidup.\nconst cfg = $('CONFIG').first().json;\nconst masukan = $input.first().json;\nconst xml = masukan.data || masukan.body || '';\nconst batasJam = Number(cfg.maks_umur_jam || 24);\nconst maksItem = Number(cfg.maks_item || 1);\nconst kataKunci = String(cfg.kata_kunci || '')\n  .split(',')\n  .map((s) => s.trim().toLowerCase())\n  .filter(Boolean);\n\nfunction ambil(teks, tag) {\n  const pola = new RegExp('<' + tag + '>([\\\\s\\\\S]*?)<\\\\/' + tag + '>');\n  const m = teks.match(pola);\n  return m ? m[1].replace(/<!\\[CDATA\\[|\\]\\]>/g, '').trim() : '';\n}\n\nconst blok = String(xml).split('<item>').slice(1);\nconst sekarang = Date.now();\nconst hasil = [];\n\nfor (const b of blok) {\n  const judul = ambil(b, 'title');\n  const tautan = ambil(b, 'link');\n  const tanggal = ambil(b, 'pubDate');\n  const sumber = ambil(b, 'source');\n  if (!judul || !tautan) continue;\n\n  const waktu = Date.parse(tanggal);\n  if (Number.isNaN(waktu)) continue;\n\n  const umurJam = (sekarang - waktu) / 3600000;\n  if (umurJam > batasJam) continue; // berita lama langsung dibuang\n\n  const teksCari = (judul + ' ' + sumber).toLowerCase();\n  const cocok = kataKunci.filter((k) => teksCari.includes(k));\n  if (kataKunci.length && cocok.length === 0) continue;\n\n  // Sidik = judul + waktu terbit. URL Google News berubah-ubah, judul tidak.\n  const sidik =\n    judul.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 70) +\n    '-' +\n    waktu;\n\n  hasil.push({\n    judul,\n    tautan,\n    sumber,\n    terbit: new Date(waktu).toISOString(),\n    umur_jam: Math.round(umurJam * 10) / 10,\n    kata_kunci: cocok.join(', '),\n    sidik,\n  });\n}\n\nhasil.sort((a, b) => a.umur_jam - b.umur_jam); // paling baru lebih dulu\nreturn hasil.slice(0, maksItem).map((x) => ({ json: x }));"
+      },
+      "id": "parse-berita",
+      "name": "Parse feed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "SHEET_ID_DI_SINI",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "seen",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "baca-seen",
+      "name": "Read seen list",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        860,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Buang kandidat yang sidiknya sudah ada di tab `seen`.\n// Input node ini adalah isi tab `seen`; kandidat diambil dari node Parse feed.\nconst kandidat = $('Parse feed').all().map((i) => i.json);\nconst sudah = new Set(\n  $input\n    .all()\n    .map((i) => String(i.json.sidik || i.json.Sidik || '').trim())\n    .filter(Boolean)\n);\nreturn kandidat.filter((k) => !sudah.has(k.sidik)).map((k) => ({ json: k }));"
+      },
+      "id": "dedupe-berita",
+      "name": "Drop duplicates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.sidik }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-baru",
+      "name": "Still any?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.6, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: $('CONFIG').first().json.gaya }, { role: 'user', content: 'Judul: ' + $json.judul + '\\nSumber: ' + $json.sumber + '\\nTautan: ' + $json.tautan } ] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "llm-berita",
+      "name": "Write the draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ubah balasan model menjadi tiga bagian. Kalau model mengembalikan teks\n// berbungkus ```json, bungkus itu dibuang dulu - ini penyebab gagal paling umum.\nconst cfg = $('CONFIG').first().json;\nconst asal = $('Parse feed').first().json;\nconst balasan = $input.first().json;\n\nconst isi =\n  balasan.choices &&\n  balasan.choices[0] &&\n  balasan.choices[0].message &&\n  balasan.choices[0].message.content\n    ? balasan.choices[0].message.content\n    : '';\n\nconst bersih = String(isi)\n  .replace(/^\\s*```(?:json)?/i, '')\n  .replace(/```\\s*$/, '')\n  .trim();\n\nlet bagian;\ntry {\n  bagian = JSON.parse(bersih);\n} catch (e) {\n  // Kalau model tidak menurut format, jangan buang beritanya: simpan mentah.\n  bagian = { pemicu: bersih, sudut: '', ajakan: '' };\n}\n\nreturn [\n  {\n    json: {\n      judul: asal.judul,\n      sumber: asal.sumber,\n      tautan: asal.tautan,\n      terbit: asal.terbit,\n      pemicu: bagian.pemicu || '',\n      sudut: bagian.sudut || '',\n      ajakan: bagian.ajakan || '',\n      dibuat: new Date().toISOString(),\n      sidik: asal.sidik,\n    },\n  },\n];"
+      },
+      "id": "split-berita",
+      "name": "Split draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1740,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "SHEET_ID_DI_SINI",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "drafts",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "simpan-draf",
+      "name": "Save draft",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "SHEET_ID_DI_SINI",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "seen",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "sidik": "={{ $json.sidik }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "sidik",
+              "displayName": "sidik",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ingat-sidik",
+      "name": "Remember hash",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2180,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "kosong",
+      "name": "Nothing new",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1520,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Every 3 hours": {
+      "main": [
+        [
+          {
+            "node": "CONFIG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONFIG": {
+      "main": [
+        [
+          {
+            "node": "Google News RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google News RSS": {
+      "main": [
+        [
+          {
+            "node": "Parse feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse feed": {
+      "main": [
+        [
+          {
+            "node": "Read seen list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read seen list": {
+      "main": [
+        [
+          {
+            "node": "Drop duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Drop duplicates": {
+      "main": [
+        [
+          {
+            "node": "Still any?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still any?": {
+      "main": [
+        [
+          {
+            "node": "Write the draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing new",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write the draft": {
+      "main": [
+        [
+          {
+            "node": "Split draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split draft": {
+      "main": [
+        [
+          {
+            "node": "Save draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save draft": {
+      "main": [
+        [
+          {
+            "node": "Remember hash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
