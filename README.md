@@ -12,14 +12,44 @@ against edge cases before it went in here. No credentials are included.
 
 ## Also in this repo, not counted above
 
-[News to draft — Google News + OpenAI](workflows/berita-ke-draf.json) is the
-workflow I use for AI drafting: it reads a news feed on a schedule, drops
-stories it has already seen, and asks a model for a structured draft it can put
-in a sheet.
+Two more workflows live here. Neither is in the table above, and the reason
+differs, so read the note on each.
 
-It is deliberately **not** in the table above. The 47 cases were run against a
-numbered test matrix I kept; this one was not, so counting it would overstate
-what is here. Read it for the pattern, not for a test count.
+### [Order sync that survives a rate limit](workflows/retry-and-error-branch.json)
+
+A payload is validated before the API call, sent with a fixed idempotency key,
+and — when the API answers 429/408/5xx — waited on and retried once. A 4xx that
+is not 429 is not retried, because retrying it cannot succeed. Either way the
+original payload is kept so the order can be replayed.
+
+Its companion is [error-workflow.json](workflows/error-workflow.json): point the
+main workflow's `settings.errorWorkflow` at it and any unhandled failure is
+classified and turned into an alert instead of dying silently.
+
+**What is tested:** 24 cases against the Code nodes — payload validation,
+status-code classification (429/408/500/503/0 → TEMPORARY; 400/401/404/422 →
+PERMANENT), the payload surviving into the failure branch, and both entry paths
+into `Record failure`.
+
+**What is not tested:** the retry loop itself. That needs a running n8n and a
+real failing endpoint, and I could not stand one up in this environment, so I am
+not claiming it. If you want to run it yourself: import both files, set
+`crm_url` in the `CONFIG` node to any endpoint that returns 429, and watch the
+execution list — you should see three attempts five seconds apart, then a row
+from `Record failure`.
+
+The node settings were checked against n8n 2.48.6 source rather than the docs,
+which is how I found that `maxTries` is clamped to 2–5 and `waitBetweenTries` to
+5000 ms. That ceiling is why the wait is a real `Wait` node and not a setting.
+
+### [News to draft — Google News + OpenAI](workflows/berita-ke-draf.json)
+
+The workflow I use for AI drafting: it reads a news feed on a schedule, drops
+stories it has already seen, and asks a model for a structured draft it can put
+in a sheet. Read it for the pattern, not for a test count.
+
+The 47 cases above were run against a numbered test matrix I kept. Neither of
+these two was, so counting them would overstate what is here.
 
 ## Why the tests matter
 

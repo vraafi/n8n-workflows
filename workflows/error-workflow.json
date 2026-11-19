@@ -1,0 +1,73 @@
+{
+  "id": "dd853dc1-fc4f-4434-ae74-307a4c351b96",
+  "name": "Error workflow - classify and alert",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "05c4c6cd-f47b-4681-8901-f4e113dce315",
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fires when any workflow that names this one in settings.errorWorkflow fails.\n// The point is that you find out from this node, not from a customer.\n//\n// Payload shape verified against v2.48.6\n// (packages/nodes-base/nodes/ErrorTrigger/ErrorTrigger.node.ts):\n//   { execution: { id, url, error, lastNodeExecuted, mode },\n//     workflow:  { id, name } }\n// The workflow name is NOT inside `execution` - reading it there yields\n// undefined, which is how an alert ends up saying workflow \"unknown\".\nconst exec = $json.execution || {};\nconst wf = $json.workflow || {};\nconst err = exec.error || {};\n\nconst code = Number(err.httpCode || err.statusCode || err.status || 0);\nconst kelas = (code === 429 || code === 408 || code >= 500) ? 'TEMPORARY' : 'PERMANENT';\n\n// `lastNodeExecuted` is the reliable one; error.node only exists for node-level\n// errors, not for expression or workflow-level failures.\nconst failedNode = exec.lastNodeExecuted || (err.node ? err.node.name : null);\n\nreturn [{\n  json: {\n    workflow: wf.name || wf.id || 'unknown',\n    workflow_id: wf.id || null,\n    failed_node: failedNode,\n    class: kelas,\n    http_code: code || null,\n    message: String(err.message || '').slice(0, 300),\n    execution_id: exec.id || null,\n    mode: exec.mode || null,\n    // Enough to decide: page someone now, or read it in the morning.\n    alert_level: kelas === 'TEMPORARY' ? 'digest' : 'immediate',\n  },\n}];\n"
+      },
+      "id": "dd043e59-aece-49ba-a4e9-d9db69d0a731",
+      "name": "Classify and shape alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Placeholder for the transport you actually use (Telegram, Slack, email).\n// Left as a Code node so this workflow imports and runs with no\n// credentials - swap it for your channel node before going live.\nreturn [{ json: { sent: true, channel: 'unconfigured',\n  would_send: $json } }];"
+      },
+      "id": "4af85ee5-2015-4d8e-b7e3-dc6579f7243d",
+      "name": "Send alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Classify and shape alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify and shape alert": {
+      "main": [
+        [
+          {
+            "node": "Send alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "description": "Error Trigger workflow: classifies the failure and decides whether it wakes someone up or waits for the morning digest."
+}

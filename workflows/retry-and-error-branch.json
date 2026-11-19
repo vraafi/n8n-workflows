@@ -1,0 +1,363 @@
+{
+  "id": "7b8e2201-063c-407c-b60e-bb4e0001e009",
+  "name": "Order sync that survives a rate limit",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "fef1a674-dbb2-4a1e-9f39-401252ea8b30",
+      "name": "When run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"crm_url\": \"https://api.example.com/v1/orders\",\n  \"max_attempts\": 3\n}",
+        "options": {}
+      },
+      "id": "0007af7a-fa96-4fe0-9a1e-966098503448",
+      "name": "CONFIG",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reject what a retry could never fix, BEFORE the API call.\n//\n// n8n's retry engine fires on any error and cannot filter by status code\n// (verified in the docs and by hand). That means a malformed body would be\n// retried three times and still fail with 400 - three times the noise for no\n// chance of success. Validation here is what keeps the retry meaningful.\nconst o = $json.body || $json || {};\n\nconst problems = [];\nif (!o.order_id) problems.push('order_id missing');\nif (!o.email || !String(o.email).includes('@')) problems.push('email missing or invalid');\nif (typeof o.amount !== 'number' || !isFinite(o.amount) || o.amount <= 0) {\n  problems.push('amount must be a positive number');\n}\n\nreturn [{\n  json: {\n    valid: problems.length === 0,\n    problems,\n    order_id: o.order_id || null,\n    payload: o,\n    // The idempotency key is derived once, here, so a retry cannot change it.\n    idem_key: o.order_id ? `order:${o.order_id}` : null,\n  },\n}];"
+      },
+      "id": "c619934d-3c53-4c8c-a017-d9209ad42fc7",
+      "name": "Validate order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "k1",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "99c03565-dc94-4477-9b4d-a24e2bde2f0f",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Never sent to the API, so the retry budget is not spent on it.\nreturn [{ json: { ok: false, rejected_before_send: true,\n  problems: $json.problems, order_id: $json.order_id } }];"
+      },
+      "id": "18614f75-9211-48df-a61f-bf4cebdd8970",
+      "name": "Record rejection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        820,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('CONFIG').first().json.crm_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "959dfef8-a730-4576-ab29-5caed02760d5",
+      "name": "Send to CRM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    ok: true,\n    order_id: $json.order_id || ($json.body ? $json.body.order_id : null),\n    recorded_at: new Date().toISOString(),\n    note: 'written once; a repeated delivery updates the same row on idem_key',\n  },\n}];"
+      },
+      "id": "7ce3db7a-ed03-492f-812e-80ca015177be",
+      "name": "Record success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide whether another attempt could plausibly work.\n//\n// 429, 408 and 5xx are the server saying \"later\" - worth waiting.\n// Any other 4xx is the server saying \"never\" - retrying is waste.\n//\n// n8n's retry engine catches every error and cannot filter by status code\n// (workflow-execute.ts, v2.48.6: `catch (error)` with no type check), so the\n// decision has to live here instead of in retryOnFail.\nconst err = $json.error || {};\nconst code = Number(err.httpCode || err.statusCode || err.status || 0);\n\n// The error output carries ONLY `error`, so the order is read back from the\n// node that produced it. Trusting $json.payload here silently sent null\n// downstream and broke the \"original payload is kept\" promise.\nconst src = $('Validate order').first().json;\n\nlet kelas = 'PERMANENT';\nif (code === 429 || code === 408 || code >= 500 || code === 0) kelas = 'TEMPORARY';\n\n// Exactly one retry stage exists downstream, so one fixed wait is all this\n// workflow can express. n8n clamps waitBetweenTries to 5000 ms, which is why\n// the wait is a real Wait node instead of a retryOnFail setting.\nconst backoff = 5;\n\nreturn [{\n  json: {\n    class: kelas,\n    http_code: code,\n    attempt: 1,\n    backoff_seconds: backoff,\n    retryable: kelas === 'TEMPORARY',\n    message: String(err.message || '').slice(0, 200),\n    payload: src.payload || null,\n    idem_key: src.idem_key || null,\n    order_id: src.order_id || null,\n  },\n}];\n"
+      },
+      "id": "8a837005-b543-4599-9fa2-5e4a1a7a3afa",
+      "name": "Classify failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "k2",
+              "leftValue": "={{ $json.retryable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "93577074-43c7-42ed-9c41-bfe0d50666b7",
+      "name": "Retryable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.backoff_seconds }}",
+        "unit": "seconds"
+      },
+      "id": "7552cde3-f904-4971-a741-48a09bbcc331",
+      "name": "Back off",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1480,
+        160
+      ],
+      "webhookId": "3e6166d4-28f8-458a-b22c-cb5acf140526"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('CONFIG').first().json.crm_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "184d782f-bb98-43d4-8edf-d736f0eb2b8b",
+      "name": "Send to CRM (after backoff)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1700,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reached from two different places, so both shapes must land here:\n//   * Retryable? out 1        - classification present, no retry allowed\n//   * Send to CRM (after backoff) error output - carries only `error`\n// In the second case the classification is read back from the classifier;\n// without that, class/http_code/idem_key were all undefined.\nconst cameFromRetryStage = !$json.class;\nconst cls = cameFromRetryStage ? ($('Classify failure').first().json || {}) : $json;\nconst err = $json.error || {};\n\nconst attempts = cameFromRetryStage ? (cls.attempt || 1) + 1 : (cls.attempt || 1);\n\nreturn [{\n  json: {\n    ok: false,\n    class: cls.class || 'PERMANENT',\n    http_code: cls.http_code !== undefined && cls.http_code !== null\n      ? cls.http_code\n      : Number(err.httpCode || err.statusCode || 0),\n    attempts,\n    idem_key: cls.idem_key || null,\n    order_id: cls.order_id || null,\n    payload_kept: cls.payload !== null && cls.payload !== undefined,\n    recorded_at: new Date().toISOString(),\n    note: 'kept for replay; nothing was written to the CRM',\n  },\n}];\n"
+      },
+      "id": "86d3a0de-c09e-4961-a534-d91a92d7dc53",
+      "name": "Record failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "When run manually": {
+      "main": [
+        [
+          {
+            "node": "CONFIG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CONFIG": {
+      "main": [
+        [
+          {
+            "node": "Validate order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate order": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Send to CRM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record rejection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to CRM": {
+      "main": [
+        [
+          {
+            "node": "Record success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify failure": {
+      "main": [
+        [
+          {
+            "node": "Retryable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retryable?": {
+      "main": [
+        [
+          {
+            "node": "Back off",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Back off": {
+      "main": [
+        [
+          {
+            "node": "Send to CRM (after backoff)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to CRM (after backoff)": {
+      "main": [
+        [
+          {
+            "node": "Record success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "description": "Retry with exponential backoff, a bounded second attempt, and an error branch that keeps the payload for replay."
+}
