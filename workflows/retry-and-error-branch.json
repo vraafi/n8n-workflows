@@ -359,5 +359,5 @@
     "executionOrder": "v1"
   },
   "tags": [],
-  "description": "Retry with exponential backoff, a bounded second attempt, and an error branch that keeps the payload for replay."
+  "description": "Validate before sending, send with a fixed idempotency key, and on 429/408/5xx wait 5s and try once more. Any other 4xx is not retried. The payload is kept either way so a failed order can be replayed."
 }
