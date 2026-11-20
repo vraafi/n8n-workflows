@@ -25,8 +25,40 @@ Its companion is [error-workflow.json](workflows/error-workflow.json): point the
 main workflow's `settings.errorWorkflow` at it and any unhandled failure is
 classified and turned into an alert instead of dying silently.
 
+**The setup step the guides leave out:** the error workflow must be **active**
+too. Pointing `settings.errorWorkflow` at an imported-but-inactive workflow
+fails silently — n8n writes one line to its log and drops the alert:
+
+```
+Calling Error Workflow for "your-workflow". Workflow "error-workflow" is not active and cannot be executed
+```
+
+So: import it, then **publish/activate it**, then point the other workflow at it.
+Both steps, or you get nothing.
+
+Measured, with a real failure forced through a webhook:
+
+| Failure | Alert received |
+|---|---|
+| Code node throws | `class: PERMANENT`, `alert_level: immediate`, `failed_node: "Gagal sengaja"`, `execution_id: 3`, `mode: webhook` |
+| HTTP node gets 500 | `class: TEMPORARY`, `http_code: 500`, `alert_level: digest`, `failed_node: "HTTP gagal"` |
+
+Two things worth knowing about how it fires:
+
+- It only fires from the **server**, not from `n8n execute` on the command line.
+  The dispatch lives in `active-workflow-manager` and `execution-lifecycle-hooks`;
+  a CLI run will fail without ever calling the error workflow. If you test by
+  hand, test against a running instance.
+- The payload has two shapes. With an execution id you get
+  `{ execution: {...}, workflow: {...} }`; without one you get
+  `{ trigger: { error, mode }, workflow }`. This workflow reads the first, which
+  is what a server-triggered failure always produces.
+
 **This one was run, not just reasoned about.** n8n 2.48.6 on Node 24, against a
-local endpoint I could script, with the calls timed:
+local endpoint I could script, with the calls timed. The 429→success case was
+then repeated on **n8n 2.35.7 / Node 22** — the version named in this README's
+header — with the same result (3 calls, +5.06 s and +5.04 s, `Record success`
+with both identifiers filled). Both files import cleanly on both versions.
 
 | Endpoint replies | API calls | Gaps between calls | Where it ended |
 |---|---|---|---|
