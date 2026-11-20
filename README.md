@@ -18,29 +18,45 @@ differs, so read the note on each.
 ### [Order sync that survives a rate limit](workflows/retry-and-error-branch.json)
 
 A payload is validated before the API call, sent with a fixed idempotency key,
-and — when the API answers 429/408/5xx — waited on and retried once. A 4xx that
-is not 429 is not retried, because retrying it cannot succeed. Either way the
-original payload is kept so the order can be replayed.
+and — when the API answers 429/408/5xx — waited on and tried once more. The
+original payload is kept either way so the order can be replayed.
 
 Its companion is [error-workflow.json](workflows/error-workflow.json): point the
 main workflow's `settings.errorWorkflow` at it and any unhandled failure is
 classified and turned into an alert instead of dying silently.
 
-**What is tested:** 24 cases against the Code nodes — payload validation,
-status-code classification (429/408/500/503/0 → TEMPORARY; 400/401/404/422 →
-PERMANENT), the payload surviving into the failure branch, and both entry paths
-into `Record failure`.
+**This one was run, not just reasoned about.** n8n 2.48.6 on Node 24, against a
+local endpoint I could script, with the calls timed:
 
-**What is not tested:** the retry loop itself. That needs a running n8n and a
-real failing endpoint, and I could not stand one up in this environment, so I am
-not claiming it. If you want to run it yourself: import both files, set
-`crm_url` in the `CONFIG` node to any endpoint that returns 429, and watch the
-execution list — you should see three attempts five seconds apart, then a row
-from `Record failure`.
+| Endpoint replies | API calls | Gaps between calls | Where it ended |
+|---|---|---|---|
+| 429, 429, 200 | 3 | +5.12 s, +5.06 s | `Record success`, `order_id` and `idem_key` filled |
+| 500 always | 5 | +5.07 s, +5.04 s, +5.13 s, +5.05 s | `Record failure`, `attempts: 2`, `payload_kept: true` |
+| 400 always | 3 | +5.12 s, +5.04 s | `Record failure`, `attempts: 1`, `payload_kept: true` |
+
+The 5 s is `waitBetweenTries` doing what it says. The 3-then-2 pattern is
+`maxTries: 3` on the first call and `maxTries: 2` on the retry.
+
+**One honest correction to the obvious claim.** I first wrote that a 4xx which
+is not 429 "is not retried". That is false, and the table shows it: the 400 run
+made three calls. `retryOnFail` catches every error and cannot look at a status
+code, so it burns two retries on a request that can never succeed. What this
+workflow actually buys you is that a permanent error never reaches the *second,
+delayed* stage — 3 calls instead of 5, and no pointless extra wait. Turning
+those 3 into 1 would mean dropping `retryOnFail` and driving the retry entirely
+from the graph; that is a different trade, and it is not what is shipped here.
+
+Beyond the three runs, 24 cases exercise the Code nodes directly: payload
+validation, status-code classification (429/408/500/503/0 → TEMPORARY;
+400/401/404/422 → PERMANENT), the payload surviving into the failure branch, and
+both entry paths into `Record failure`.
 
 The node settings were checked against n8n 2.48.6 source rather than the docs,
 which is how I found that `maxTries` is clamped to 2–5 and `waitBetweenTries` to
 5000 ms. That ceiling is why the wait is a real `Wait` node and not a setting.
+
+To reproduce: import both files, point `crm_url` in `CONFIG` at an endpoint that
+returns 429, and open the execution list.
 
 ### [News to draft — Google News + OpenAI](workflows/berita-ke-draf.json)
 

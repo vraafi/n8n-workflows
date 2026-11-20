@@ -15,8 +15,25 @@
     },
     {
       "parameters": {
-        "mode": "raw",
-        "jsonOutput": "{\n  \"crm_url\": \"https://api.example.com/v1/orders\",\n  \"max_attempts\": 3\n}",
+        "mode": "manual",
+        "duplicateItem": false,
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "crm_url",
+              "value": "https://api.example.com/v1/orders",
+              "type": "string"
+            },
+            {
+              "id": "c2",
+              "name": "max_attempts",
+              "value": 3,
+              "type": "number"
+            }
+          ]
+        },
         "options": {}
       },
       "id": "0007af7a-fa96-4fe0-9a1e-966098503448",
@@ -114,7 +131,7 @@
     },
     {
       "parameters": {
-        "jsCode": "return [{\n  json: {\n    ok: true,\n    order_id: $json.order_id || ($json.body ? $json.body.order_id : null),\n    recorded_at: new Date().toISOString(),\n    note: 'written once; a repeated delivery updates the same row on idem_key',\n  },\n}];"
+        "jsCode": "// The HTTP response is not the order. Reading $json.order_id here produced\n// null on every success, because $json is whatever the CRM replied with.\n// The identifiers are read back from the node that produced them.\nconst src = $('Validate order').first().json;\n\nreturn [{\n  json: {\n    ok: true,\n    order_id: src.order_id || null,\n    idem_key: src.idem_key || null,\n    recorded_at: new Date().toISOString(),\n    note: 'written once; a repeated delivery updates the same row on idem_key',\n  },\n}];\n"
       },
       "id": "7ce3db7a-ed03-492f-812e-80ca015177be",
       "name": "Record success",
@@ -127,7 +144,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Decide whether another attempt could plausibly work.\n//\n// 429, 408 and 5xx are the server saying \"later\" - worth waiting.\n// Any other 4xx is the server saying \"never\" - retrying is waste.\n//\n// n8n's retry engine catches every error and cannot filter by status code\n// (workflow-execute.ts, v2.48.6: `catch (error)` with no type check), so the\n// decision has to live here instead of in retryOnFail.\nconst err = $json.error || {};\nconst code = Number(err.httpCode || err.statusCode || err.status || 0);\n\n// The error output carries ONLY `error`, so the order is read back from the\n// node that produced it. Trusting $json.payload here silently sent null\n// downstream and broke the \"original payload is kept\" promise.\nconst src = $('Validate order').first().json;\n\nlet kelas = 'PERMANENT';\nif (code === 429 || code === 408 || code >= 500 || code === 0) kelas = 'TEMPORARY';\n\n// Exactly one retry stage exists downstream, so one fixed wait is all this\n// workflow can express. n8n clamps waitBetweenTries to 5000 ms, which is why\n// the wait is a real Wait node instead of a retryOnFail setting.\nconst backoff = 5;\n\nreturn [{\n  json: {\n    class: kelas,\n    http_code: code,\n    attempt: 1,\n    backoff_seconds: backoff,\n    retryable: kelas === 'TEMPORARY',\n    message: String(err.message || '').slice(0, 200),\n    payload: src.payload || null,\n    idem_key: src.idem_key || null,\n    order_id: src.order_id || null,\n  },\n}];\n"
+        "jsCode": "// Decide whether another attempt could plausibly work.\n//\n// 429, 408 and 5xx are the server saying \"later\" - worth waiting.\n// Any other 4xx is the server saying \"never\" - retrying is waste.\n//\n// n8n's retry engine catches every error and cannot filter by status code\n// (workflow-execute.ts, v2.48.6: `catch (error)` with no type check), so the\n// decision has to live here instead of in retryOnFail.\nconst err = $json.error || {};\nconst code = Number(err.httpCode || err.statusCode || err.status || 0);\n\n// The error output does carry the input item - n8n merges the paired item with\n// the error (workflow-execute.ts: {...item, json: {...pairedInputItem.json,\n// ...item.json}}). The order is still read from Validate order explicitly,\n// because that merge is an internal detail and this node should not depend on\n// it staying that way.\nconst src = $('Validate order').first().json;\n\nlet kelas = 'PERMANENT';\nif (code === 429 || code === 408 || code >= 500 || code === 0) kelas = 'TEMPORARY';\n\n// Exactly one retry stage exists downstream, so one fixed wait is all this\n// workflow can express. n8n clamps waitBetweenTries to 5000 ms, which is why\n// the wait is a real Wait node instead of a retryOnFail setting.\nconst backoff = 5;\n\nreturn [{\n  json: {\n    class: kelas,\n    http_code: code,\n    attempt: 1,\n    backoff_seconds: backoff,\n    retryable: kelas === 'TEMPORARY',\n    message: String(err.message || '').slice(0, 200),\n    payload: src.payload || null,\n    idem_key: src.idem_key || null,\n    order_id: src.order_id || null,\n  },\n}];\n"
       },
       "id": "8a837005-b543-4599-9fa2-5e4a1a7a3afa",
       "name": "Classify failure",
@@ -213,7 +230,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Reached from two different places, so both shapes must land here:\n//   * Retryable? out 1        - classification present, no retry allowed\n//   * Send to CRM (after backoff) error output - carries only `error`\n// In the second case the classification is read back from the classifier;\n// without that, class/http_code/idem_key were all undefined.\nconst cameFromRetryStage = !$json.class;\nconst cls = cameFromRetryStage ? ($('Classify failure').first().json || {}) : $json;\nconst err = $json.error || {};\n\nconst attempts = cameFromRetryStage ? (cls.attempt || 1) + 1 : (cls.attempt || 1);\n\nreturn [{\n  json: {\n    ok: false,\n    class: cls.class || 'PERMANENT',\n    http_code: cls.http_code !== undefined && cls.http_code !== null\n      ? cls.http_code\n      : Number(err.httpCode || err.statusCode || 0),\n    attempts,\n    idem_key: cls.idem_key || null,\n    order_id: cls.order_id || null,\n    payload_kept: cls.payload !== null && cls.payload !== undefined,\n    recorded_at: new Date().toISOString(),\n    note: 'kept for replay; nothing was written to the CRM',\n  },\n}];\n"
+        "jsCode": "// Reached from two places:\n//   * Retryable? out 1                          - permanent error, no retry\n//   * Send to CRM (after backoff) error output  - the one retry was spent\n//\n// Neither \"is `class` present\" nor \"$('Back off') throws\" tells them apart:\n// the error output merges the input item, and $() on an unexecuted node does\n// not throw. What does distinguish them is `retryable`, because Retryable?\n// sends true to Back off and false straight here.\nconst reachedRetryStage = $json.retryable === true;\n\nconst cls = $json.class ? $json : ($('Classify failure').first().json || {});\nconst err = $json.error || {};\n\n// Workflow-level attempts. Each HTTP node also retries internally\n// (maxTries 3, then 2), so real API calls can be more - this counts passes\n// through the graph, not socket writes.\nconst attempts = reachedRetryStage ? (cls.attempt || 1) + 1 : (cls.attempt || 1);\n\nreturn [{\n  json: {\n    ok: false,\n    class: cls.class || 'PERMANENT',\n    http_code: cls.http_code !== undefined && cls.http_code !== null\n      ? cls.http_code\n      : Number(err.httpCode || err.statusCode || 0),\n    attempts,\n    idem_key: cls.idem_key || null,\n    order_id: cls.order_id || null,\n    payload_kept: cls.payload !== null && cls.payload !== undefined,\n    recorded_at: new Date().toISOString(),\n    note: 'kept for replay; nothing was written to the CRM',\n  },\n}];\n"
       },
       "id": "86d3a0de-c09e-4961-a534-d91a92d7dc53",
       "name": "Record failure",
@@ -222,6 +239,22 @@
       "position": [
         1920,
         300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Order sync that survives a rate limit\n\n**Set up:** open `CONFIG` and change `crm_url` to your endpoint. Everything else\nworks as-is.\n\n**How it behaves, measured on n8n 2.48.6:**\n\n- 429 / 408 / 5xx -> waited 5s, tried again (3 calls total, then 2 more after the backoff)\n- 400 / 401 / 404 -> classified PERMANENT, no backoff stage\n- Either way the original payload is kept for replay\n\n**One thing to know:** `retryOnFail` on the HTTP nodes cannot filter by status\ncode, so a 400 is still tried three times before the classifier stops it. That\nis n8n, not this workflow. If you need exactly one call for permanent errors,\nturn `retryOnFail` off on both HTTP nodes and let the graph do the retrying.\n\n**Error workflow:** create a second workflow starting with an Error Trigger,\npaste the contents of `error-workflow.json`, then set this workflow's\n`Settings -> Error Workflow` to it.",
+        "height": 420,
+        "width": 460,
+        "color": 4
+      },
+      "id": "sticky-0000-0000-0000-000000000001",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
       ]
     }
   ],
